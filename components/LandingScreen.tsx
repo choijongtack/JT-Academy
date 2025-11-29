@@ -17,7 +17,7 @@ const LandingScreen: React.FC<LandingScreenProps> = ({ onNavigateToAuth }) => {
         <div className="min-h-screen bg-slate-50 dark:bg-slate-900 flex flex-col">
             {/* Header */}
             <header className="bg-white dark:bg-slate-800 shadow-sm sticky top-0 z-10">
-                <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-24 flex items-center justify-between">
+                <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-auto md:h-24 py-4 md:py-0 flex flex-col md:flex-row items-center justify-between gap-4 md:gap-0">
                     <div className="flex items-center">
                         <h1 className="text-6xl font-extrabold font-['Outfit'] text-transparent bg-clip-text bg-gradient-to-r from-blue-600 to-teal-500 tracking-tight">
                             JT Academy
@@ -55,8 +55,8 @@ const LandingScreen: React.FC<LandingScreenProps> = ({ onNavigateToAuth }) => {
                                     key={cert}
                                     onClick={() => setSelectedCert(cert)}
                                     className={`w-full text-left p-4 rounded-lg transition-all duration-200 ${selectedCert === cert
-                                            ? 'bg-blue-50 dark:bg-blue-900/30 border-blue-200 dark:border-blue-800 text-blue-700 dark:text-blue-300 shadow-sm border'
-                                            : 'hover:bg-slate-50 dark:hover:bg-slate-700/50 text-slate-600 dark:text-slate-400 border border-transparent'
+                                        ? 'bg-blue-50 dark:bg-blue-900/30 border-blue-200 dark:border-blue-800 text-blue-700 dark:text-blue-300 shadow-sm border'
+                                        : 'hover:bg-slate-50 dark:hover:bg-slate-700/50 text-slate-600 dark:text-slate-400 border border-transparent'
                                         }`}
                                 >
                                     <span className="font-semibold block">{cert}</span>
