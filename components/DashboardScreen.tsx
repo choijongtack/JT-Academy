@@ -73,7 +73,7 @@ const DashboardScreen: React.FC<DashboardScreenProps> = ({ navigate, startMockTe
             {filteredSubjectStats.length > 0 && (
                 <div>
                     <h3 className="text-xl font-bold text-slate-800 dark:text-slate-200 mb-4">과목별 학습 진행율</h3>
-                    <div className="w-full h-72 bg-slate-100 dark:bg-slate-700 p-4 rounded-lg">
+                    <div className={`w-full h-72 bg-slate-100 dark:bg-slate-700 rounded-lg ${isMobile ? 'p-0 pt-4 pb-4' : 'p-4'}`}>
                         {/* Chart for subject progress */}
                         <ResponsiveContainer width="100%" height="100%">
                             <BarChart
@@ -82,7 +82,7 @@ const DashboardScreen: React.FC<DashboardScreenProps> = ({ navigate, startMockTe
                                     progress: s.totalCount > 0 ? (s.solvedCount / s.totalCount) * 100 : 0
                                 }))}
                                 layout={isMobile ? 'vertical' : 'horizontal'}
-                                margin={{ top: 5, right: 30, left: isMobile ? 40 : -10, bottom: 5 }}
+                                margin={{ top: 5, right: 30, left: isMobile ? -40 : -10, bottom: 5 }}
                             >
                                 <CartesianGrid strokeDasharray="3 3" strokeOpacity={0.2} />
                                 {isMobile ? (
@@ -91,8 +91,9 @@ const DashboardScreen: React.FC<DashboardScreenProps> = ({ navigate, startMockTe
                                         <YAxis
                                             dataKey="subject"
                                             type="category"
-                                            width={100}
-                                            tick={{ fontSize: 11 }}
+                                            width={140}
+                                            tick={{ fontSize: 10 }}
+                                            orientation="left"
                                         />
                                     </>
                                 ) : (
