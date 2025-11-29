@@ -42,10 +42,10 @@ const LandingScreen: React.FC<LandingScreenProps> = ({ onNavigateToAuth }) => {
 
             {/* Main Content */}
             <main className="flex-grow max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12 w-full">
-                <div className="flex flex-col md:flex-row gap-8 h-[calc(100vh-10rem)]">
+                <div className="flex flex-col md:flex-row gap-8 h-auto md:h-[calc(100vh-10rem)]">
 
                     {/* Left Column: Certification List */}
-                    <div className="w-full md:w-1/3 lg:w-1/4 bg-white dark:bg-slate-800 rounded-xl shadow-sm border border-slate-200 dark:border-slate-700 overflow-hidden flex flex-col">
+                    <div className="w-full md:w-1/3 lg:w-1/4 bg-white dark:bg-slate-800 rounded-xl shadow-sm border border-slate-200 dark:border-slate-700 overflow-hidden flex flex-col h-80 md:h-full">
                         <div className="p-4 bg-slate-100 dark:bg-slate-900 border-b border-slate-200 dark:border-slate-700">
                             <h2 className="font-bold text-lg text-slate-800 dark:text-slate-200">자격증 목록</h2>
                         </div>
