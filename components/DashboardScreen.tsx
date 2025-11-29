@@ -3,6 +3,7 @@ import { Screen, LearningProgress, AuthSession } from '../types';
 import { quizApi } from '../services/quizApi';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import { Certification, getSubjectsByCertification } from '../constants';
+import { useMediaQuery } from '../hooks/useMediaQuery';
 
 interface DashboardScreenProps {
     navigate: (screen: Screen) => void;
@@ -13,6 +14,7 @@ interface DashboardScreenProps {
 
 const DashboardScreen: React.FC<DashboardScreenProps> = ({ navigate, startMockTest, session, certification }) => {
     const [progress, setProgress] = useState<LearningProgress | null>(null);
+    const isMobile = useMediaQuery('(max-width: 768px)');
 
     const fetchProgress = useCallback(async () => {
         if (session) {
@@ -92,48 +94,62 @@ const DashboardScreen: React.FC<DashboardScreenProps> = ({ navigate, startMockTe
                                     ...s,
                                     progress: s.totalCount > 0 ? (s.solvedCount / s.totalCount) * 100 : 0
                                 }))}
-                                margin={{ top: 5, right: 20, left: -10, bottom: 5 }}
+                                layout={isMobile ? 'vertical' : 'horizontal'}
+                                margin={{ top: 5, right: 30, left: isMobile ? 40 : -10, bottom: 5 }}
                             >
                                 <CartesianGrid strokeDasharray="3 3" strokeOpacity={0.2} />
-                                <XAxis
-                                    dataKey="subject"
-                                    interval={0}
-                                    tick={({ x, y, payload }) => {
-                                        const text = payload.value;
-                                        const words = text.split(' ');
-                                        // Specific logic for known long subjects
-                                        let lines = [text];
-                                        if (text === "회로이론 및 제어공학" || text === "회로이론 및 제어 공학") {
-                                            lines = ["회로이론 및", "제어공학"];
-                                        } else if (text === "전기설비기술기준 및 판단기준") {
-                                            lines = ["전기설비기술기준", "및 판단기준"];
-                                        } else if (text.length > 8) {
-                                            // General split for long names
-                                            const mid = Math.floor(text.length / 2);
-                                            lines = [text.substring(0, mid), text.substring(mid)];
-                                        }
+                                {isMobile ? (
+                                    <>
+                                        <XAxis type="number" unit="%" />
+                                        <YAxis
+                                            dataKey="subject"
+                                            type="category"
+                                            width={100}
+                                            tick={{ fontSize: 11 }}
+                                        />
+                                    </>
+                                ) : (
+                                    <>
+                                        <XAxis
+                                            dataKey="subject"
+                                            interval={0}
+                                            tick={({ x, y, payload }) => {
+                                                const text = payload.value;
+                                                // Specific logic for known long subjects
+                                                let lines = [text];
+                                                if (text === "회로이론 및 제어공학" || text === "회로이론 및 제어 공학") {
+                                                    lines = ["회로이론 및", "제어공학"];
+                                                } else if (text === "전기설비기술기준 및 판단기준") {
+                                                    lines = ["전기설비기술기준", "및 판단기준"];
+                                                } else if (text.length > 8) {
+                                                    // General split for long names
+                                                    const mid = Math.floor(text.length / 2);
+                                                    lines = [text.substring(0, mid), text.substring(mid)];
+                                                }
 
-                                        return (
-                                            <g transform={`translate(${x},${y})`}>
-                                                {lines.map((line: string, index: number) => (
-                                                    <text
-                                                        key={index}
-                                                        x={0}
-                                                        y={0}
-                                                        dy={16 + index * 12}
-                                                        textAnchor="middle"
-                                                        fill="#666"
-                                                        fontSize={12}
-                                                    >
-                                                        {line}
-                                                    </text>
-                                                ))}
-                                            </g>
-                                        );
-                                    }}
-                                    height={60}
-                                />
-                                <YAxis unit="%" />
+                                                return (
+                                                    <g transform={`translate(${x},${y})`}>
+                                                        {lines.map((line: string, index: number) => (
+                                                            <text
+                                                                key={index}
+                                                                x={0}
+                                                                y={0}
+                                                                dy={16 + index * 12}
+                                                                textAnchor="middle"
+                                                                fill="#666"
+                                                                fontSize={12}
+                                                            >
+                                                                {line}
+                                                            </text>
+                                                        ))}
+                                                    </g>
+                                                );
+                                            }}
+                                            height={60}
+                                        />
+                                        <YAxis unit="%" />
+                                    </>
+                                )}
                                 <Tooltip
                                     contentStyle={{
                                         backgroundColor: 'rgba(30, 41, 59, 0.8)',
