@@ -37,26 +37,13 @@ const DashboardScreen: React.FC<DashboardScreenProps> = ({ navigate, startMockTe
 
     // Recalculate totals based on filtered stats
     const solvedQuestions = filteredSubjectStats.reduce((acc, s) => acc + s.solvedCount, 0);
-    const totalQuestions = filteredSubjectStats.reduce((acc, s) => acc + s.totalCount, 0); // This might be 0 if totalCount is not populated correctly per subject in API, but assuming it is.
-    // Actually totalQuestions in progress object is global. We should sum up from stats if available.
-    // Looking at quizApi.getLearningProgress:
-    // stats.totalQuestions comes from counting questions per subject. So summing them up is correct.
+    const totalQuestions = filteredSubjectStats.reduce((acc, s) => acc + s.totalCount, 0);
 
     const completionRate = totalQuestions > 0 ? (solvedQuestions / totalQuestions) * 100 : 0;
 
     const totalCorrect = filteredSubjectStats.reduce((acc, s) => acc + s.correct, 0);
     const totalAttempted = filteredSubjectStats.reduce((acc, s) => acc + s.total, 0);
     const accuracy = totalAttempted > 0 ? (totalCorrect / totalAttempted) * 100 : 0;
-
-    // Note: totalWrongAnswers is global in the API response, not per subject. 
-    // We can't easily filter wrong answers count without fetching them or having them broken down by subject in the API response.
-    // However, for the dashboard display, maybe we can just show the global wrong answers or leave it as is?
-    // The user asked to show "Subject Learning Progress" (the chart) for the selected certification.
-    // It's better if the top cards also reflect the certification if possible.
-    // But totalWrongAnswers is just a number in the response.
-    // Let's leave totalWrongAnswers as global for now, or if we want to be precise, we would need to update the API to return wrong answers count per subject or filter them here if we had the list.
-    // We don't have the list of wrong answers here, just the count.
-    // So I will leave totalWrongAnswers as is, but update Completion and Accuracy.
 
     return (
         <div className="space-y-8">
