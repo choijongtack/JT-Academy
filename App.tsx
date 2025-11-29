@@ -5,6 +5,8 @@ import QuizScreen from './components/QuizScreen';
 import WrongNoteScreen from './components/WrongNoteScreen';
 import SubjectSelectionScreen from './components/SubjectSelectionScreen';
 import AiVariantGeneratorScreen from './components/AiVariantGeneratorScreen';
+import AdminQuestionManagementScreen from './components/AdminQuestionManagementScreen';
+import LandingScreen from './components/LandingScreen';
 import AuthScreen from './components/AuthScreen';
 import { quizApi } from './services/quizApi';
 import { supabase } from './services/supabaseClient';
@@ -24,6 +26,8 @@ const App: React.FC = () => {
 
   const [initialSolvedRecords, setInitialSolvedRecords] = useState<Record<number, import('./types').UserQuizRecord>>({});
   const [isMockTest, setIsMockTest] = useState(false);
+  const [showLanding, setShowLanding] = useState(true);
+  const [authMode, setAuthMode] = useState<'login' | 'signup'>('login');
   const isMobile = useMediaQuery('(max-width: 768px)');
 
   const containerClasses = isMobile
@@ -172,6 +176,8 @@ const App: React.FC = () => {
       case 'ai-variant-generator':
         return <AiVariantGeneratorScreen navigate={navigate} session={session} certification={selectedCertification} onQuestionsUpdated={() => {
         }} />;
+      case 'admin-questions':
+        return <AdminQuestionManagementScreen navigate={navigate} session={session} />;
       case 'dashboard':
       default:
         return <DashboardScreen navigate={navigate} startMockTest={startMockTest} session={session} certification={selectedCertification} />;
@@ -186,7 +192,22 @@ const App: React.FC = () => {
     );
   }
 
+
+
+  // ... (existing code)
+
   if (!session) {
+    if (showLanding) {
+      return (
+        <LandingScreen
+          onNavigateToAuth={(mode) => {
+            setAuthMode(mode);
+            setShowLanding(false);
+          }}
+        />
+      );
+    }
+
     return (
       <div className={containerClasses}>
         <header className={headerWrapperClasses}>
@@ -198,7 +219,18 @@ const App: React.FC = () => {
           </div>
         </header>
         <main className={cardClasses}>
-          <AuthScreen />
+          <AuthScreen initialMode={authMode} />
+          <div className="mt-6 text-center">
+            <button
+              onClick={() => setShowLanding(true)}
+              className="text-sm text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200 flex items-center justify-center mx-auto gap-1"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
+              </svg>
+              메인 화면으로 돌아가기
+            </button>
+          </div>
         </main>
         <footer className={footerClasses}>
           <p>&copy; {new Date().getFullYear()} AI Learning Tool. All rights reserved.</p>
@@ -238,15 +270,27 @@ const App: React.FC = () => {
         {/* Actions moved to Card */}
         <div className="w-full flex justify-end items-center gap-3 text-sm mb-6 border-b pb-4 dark:border-slate-700">
           {isAdmin(session) && (
-            <button
-              onClick={() => navigate('ai-variant-generator')}
-              className="bg-yellow-500 hover:bg-yellow-600 text-white font-semibold py-1 px-3 rounded-md transition-colors flex items-center"
-            >
-              <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 mr-1.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
-              </svg>
-              문제 UPLOAD
-            </button>
+            <>
+              <button
+                onClick={() => navigate('admin-questions')}
+                className="bg-purple-500 hover:bg-purple-600 text-white font-semibold py-1 px-3 rounded-md transition-colors flex items-center"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 mr-1.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                </svg>
+                문제 관리
+              </button>
+              <button
+                onClick={() => navigate('ai-variant-generator')}
+                className="bg-yellow-500 hover:bg-yellow-600 text-white font-semibold py-1 px-3 rounded-md transition-colors flex items-center"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 mr-1.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                </svg>
+                문제 UPLOAD
+              </button>
+            </>
           )}
           <span className={`text-slate-600 dark:text-slate-300${isMobile ? ' hidden' : ''}`}>
             {session.user.email}
@@ -255,7 +299,7 @@ const App: React.FC = () => {
             <button onClick={() => navigate(quizReturnScreen)} className="bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-200 font-semibold py-1 px-3 rounded-md transition-colors">
               퀴즈 종료
             </button>
-          ) : currentScreen === 'subject-select' || currentScreen === 'wrong-note' ? (
+          ) : currentScreen === 'subject-select' || currentScreen === 'wrong-note' || currentScreen === 'ai-variant-generator' || currentScreen === 'admin-questions' ? (
             <button onClick={() => navigate('dashboard')} className="bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-200 font-semibold py-1 px-3 rounded-md transition-colors">
               메인으로
             </button>

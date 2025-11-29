@@ -655,5 +655,145 @@ export const quizApi = {
       console.error('Error deleting certification standard:', error);
       throw new Error('Failed to delete certification standard');
     }
+  },
+
+  // Admin Question Management Functions
+
+  /**
+   * Update an existing question's properties (admin only)
+   * @param id Question ID to update
+   * @param updates Partial question data to update
+   * @returns Updated question
+   */
+  updateQuestion: async (id: number, updates: Partial<Omit<QuestionModel, 'id'>>): Promise<QuestionModel> => {
+    const updateData: any = {};
+
+    if (updates.subject !== undefined) updateData.subject = updates.subject;
+    if (updates.year !== undefined) updateData.year = updates.year;
+    if (updates.questionText !== undefined) updateData.question_text = updates.questionText;
+    if (updates.options !== undefined) updateData.options = updates.options;
+    if (updates.answerIndex !== undefined) updateData.answer_index = updates.answerIndex;
+    if (updates.aiExplanation !== undefined) updateData.ai_explanation = updates.aiExplanation;
+    if (updates.isVariant !== undefined) updateData.is_variant = updates.isVariant;
+    if (updates.parentQuestionId !== undefined) updateData.parent_question_id = updates.parentQuestionId;
+    if (updates.topicCategory !== undefined) updateData.topic_category = updates.topicCategory;
+    if (updates.topicKeywords !== undefined) updateData.topic_keywords = updates.topicKeywords;
+    if (updates.frequency !== undefined) updateData.frequency = updates.frequency;
+    if (updates.difficultyLevel !== undefined) updateData.difficulty_level = updates.difficultyLevel;
+    if (updates.hint !== undefined) updateData.hint = updates.hint;
+    if (updates.rationale !== undefined) updateData.rationale = updates.rationale;
+    if (updates.imageUrl !== undefined) updateData.image_url = updates.imageUrl;
+    if (updates.textFileUrl !== undefined) updateData.text_file_url = updates.textFileUrl;
+    if (updates.diagramUrl !== undefined) updateData.diagram_url = updates.diagramUrl;
+    if (updates.certification !== undefined) updateData.certification = updates.certification;
+
+    // Check if there's anything to update
+    if (Object.keys(updateData).length === 0) {
+      throw new Error('No fields to update');
+    }
+
+    console.log('Updating question:', id, 'with data:', updateData);
+
+    // Just do the update without trying to fetch the result
+    const { error, count } = await supabase
+      .from('questions')
+      .update(updateData)
+      .eq('id', id);
+
+    if (error) {
+      console.error('Error updating question:', error);
+      console.error('Update data:', updateData);
+      console.error('Question ID:', id);
+      throw new Error(`Failed to update question: ${error.message || JSON.stringify(error)}`);
+    }
+
+    console.log('Update successful, rows affected:', count);
+
+    // Return a merged object with the updates applied
+    // The UI will refresh from getAllQuestions anyway
+    return {
+      id,
+      subject: updates.subject || '',
+      year: updates.year || 0,
+      questionText: updates.questionText || '',
+      options: updates.options || [],
+      answerIndex: updates.answerIndex || 0,
+      aiExplanation: updates.aiExplanation || null,
+      isVariant: updates.isVariant,
+      parentQuestionId: updates.parentQuestionId,
+      topicCategory: updates.topicCategory,
+      topicKeywords: updates.topicKeywords,
+      frequency: updates.frequency,
+      difficultyLevel: updates.difficultyLevel,
+      hint: updates.hint,
+      rationale: updates.rationale,
+      imageUrl: updates.imageUrl,
+      textFileUrl: updates.textFileUrl,
+      diagramUrl: updates.diagramUrl,
+      certification: updates.certification,
+    } as QuestionModel;
+  },
+
+  /**
+   * Delete a question from the database (admin only)
+   * Note: This does NOT delete associated storage files
+   * @param id Question ID to delete
+   */
+  deleteQuestion: async (id: number): Promise<void> => {
+    const { error } = await supabase
+      .from('questions')
+      .delete()
+      .eq('id', id);
+
+    if (error) {
+      console.error('Error deleting question:', error);
+      throw new Error('Failed to delete question');
+    }
+  },
+
+  /**
+   * Delete a question and all associated storage files (admin only)
+   * @param id Question ID to delete
+   */
+  deleteQuestionWithStorage: async (id: number): Promise<void> => {
+    // First, get the question to find storage URLs
+    const question = await quizApi.getQuestionById(id);
+
+    if (!question) {
+      throw new Error('Question not found');
+    }
+
+    // Extract file paths from URLs and delete from storage
+    const storageUrls = [
+      question.imageUrl,
+      question.textFileUrl,
+      question.diagramUrl
+    ].filter(Boolean) as string[];
+
+    for (const url of storageUrls) {
+      try {
+        // Extract the storage path from the URL
+        // URL format: https://<project>.supabase.co/storage/v1/object/public/<bucket>/<path>
+        const urlParts = url.split('/storage/v1/object/public/');
+        if (urlParts.length === 2) {
+          const [bucket, ...pathParts] = urlParts[1].split('/');
+          const filePath = pathParts.join('/');
+
+          const { error: storageError } = await supabase.storage
+            .from(bucket)
+            .remove([filePath]);
+
+          if (storageError) {
+            console.error(`Error deleting storage file ${filePath}:`, storageError);
+            // Continue with other files even if one fails
+          }
+        }
+      } catch (err) {
+        console.error('Error parsing storage URL:', url, err);
+      }
+    }
+
+    // Delete the question from database
+    await quizApi.deleteQuestion(id);
   }
 };

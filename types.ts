@@ -70,7 +70,7 @@ export interface TopicStats {
   averageAccuracy?: number;     // Optional: user performance
 }
 
-export type Screen = 'dashboard' | 'quiz' | 'wrong-note' | 'subject-select' | 'ai-variant-generator';
+export type Screen = 'dashboard' | 'quiz' | 'wrong-note' | 'subject-select' | 'ai-variant-generator' | 'admin-questions';
 
 export type AuthSession = Session;
 
