@@ -7,7 +7,7 @@ interface LandingScreenProps {
 
 const CERTIFICATION_DESCRIPTIONS: Record<Certification, string> = {
     '전기기사': '전력 공급의 안정성을 확보하고 전기설비의 공사, 유지보수 및 운용을 담당하는 전문가를 양성하는 국가기술자격입니다. 전력공학, 전기기기, 회로이론 등 전기 공학의 핵심 이론과 실무 능력을 평가합니다.',
-    '신재생에너지발전설비기사(태양광)': '태양광 발전 시스템의 기획, 설계, 시공, 운영 및 유지보수 업무를 수행하는 전문 인력을 양성합니다. 친환경 에너지 시대를 선도하는 미래 지향적인 자격증입니다.'
+    '신재생에너지발전설비기사(태양광)': '태양광 발전 시스템의 기획, 설계, 시공, 운영 및 유지보수 업무를 수행하는 전문 인력을 양성합니다. 친환경 에너지 시대를 선도하는 미래 지향적인 자격증입니다.\n\n2020년부터 시험 과목이 기존 5개(100문제)에서 4개(80문제)로 변경되었습니다.\n\n[1과목] 태양광발전 기획, [2과목] 태양광발전 설계, [3과목] 태양광발전 시공, [4과목] 태양광발전 운영(신재생에너지 관련 법규 포함)으로 구성됩니다.\n\n합격점수는 100점 만점에 60점(80문제 중 48문제) 이상입니다.\n\n단, 과목별 100점 만점에 40점(20문제 중 8문제) 이상 득점하지 못한 과목이 있으면 과목낙제로 실격됩니다.'
 };
 
 const LandingScreen: React.FC<LandingScreenProps> = ({ onNavigateToAuth }) => {
@@ -72,9 +72,11 @@ const LandingScreen: React.FC<LandingScreenProps> = ({ onNavigateToAuth }) => {
                                 <h2 className="text-3xl font-bold text-slate-800 dark:text-slate-100 mb-4">
                                     {selectedCert}
                                 </h2>
-                                <p className="text-lg text-slate-600 dark:text-slate-300 leading-relaxed">
-                                    {CERTIFICATION_DESCRIPTIONS[selectedCert]}
-                                </p>
+                                <div className="text-lg text-slate-600 dark:text-slate-300 leading-relaxed space-y-3">
+                                    {CERTIFICATION_DESCRIPTIONS[selectedCert].split('\n').map((line, index) => (
+                                        line.trim() ? <p key={index}>{line}</p> : <br key={index} />
+                                    ))}
+                                </div>
                             </div>
 
                             <div className="space-y-6">

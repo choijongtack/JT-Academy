@@ -263,15 +263,17 @@ const QuizScreen: React.FC<QuizScreenProps> = ({ questions, onFinish, title, ses
     <div className="flex flex-col max-w-3xl mx-auto w-full">
       {/* Top Header: Progress & Stats */}
       <div className="mb-8">
-        <div className="flex gap-1 mb-2">
-          {questions.map((_, idx) => (
-            <div
-              key={idx}
-              className={`h-1.5 flex-1 rounded-full transition-colors ${idx < currentQuestionIndex ? 'bg-yellow-400' :
-                idx === currentQuestionIndex ? 'bg-blue-600' : 'bg-slate-200 dark:bg-slate-700'
-                }`}
-            />
-          ))}
+        <div className="overflow-x-auto mb-2">
+          <div className="flex gap-1 min-w-full">
+            {questions.map((_, idx) => (
+              <div
+                key={idx}
+                className={`h-1.5 flex-1 min-w-[4px] rounded-full transition-colors ${idx < currentQuestionIndex ? 'bg-yellow-400' :
+                  idx === currentQuestionIndex ? 'bg-blue-600' : 'bg-slate-200 dark:bg-slate-700'
+                  }`}
+              />
+            ))}
+          </div>
         </div>
 
         {/* Timer Display (for timed exams) */}
