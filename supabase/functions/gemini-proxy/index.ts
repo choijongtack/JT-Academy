@@ -1,5 +1,5 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { GoogleGenAI } from "npm:@google/genai";
+import { GoogleGenerativeAI } from "npm:@google/generative-ai";
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -18,7 +18,7 @@ serve(async (req) => {
       throw new Error('GEMINI_API_KEY is not set');
     }
 
-    const ai = new GoogleGenAI({ apiKey });
+    const genAI = new GoogleGenerativeAI(apiKey);
     const { action, payload } = await req.json();
 
     console.log(`Processing action: ${action}`);
@@ -28,62 +28,77 @@ serve(async (req) => {
     switch (action) {
       case 'generateContent': {
         // Generic content generation
-        const { model, prompt, schema } = payload;
-        const config: any = {};
+        const { model, prompt, schema, imageParts } = payload;
+        const modelName = model || "gemini-2.0-flash-exp";
+        const generationConfig: any = {};
+
         if (schema) {
-            config.responseMimeType = "application/json";
-            config.responseSchema = schema;
+          generationConfig.responseMimeType = "application/json";
+          generationConfig.responseSchema = schema;
         }
-        
-        const response = await ai.models.generateContent({
-            model: model || "gemini-2.5-flash",
-            contents: prompt,
-            config
+
+        const geminiModel = genAI.getGenerativeModel({
+          model: modelName,
+          generationConfig
         });
-        result = response.text;
+
+        // Build parts array
+        const parts = [];
+        if (typeof prompt === 'string') {
+          parts.push({ text: prompt });
+        }
+        if (imageParts && Array.isArray(imageParts)) {
+          parts.push(...imageParts);
+        }
+
+        const response = await geminiModel.generateContent(parts);
+        result = response.response.text();
         break;
       }
 
       case 'generateExplanation': {
         const { prompt } = payload;
-        const response = await ai.models.generateContent({
-          model: "gemini-2.5-flash",
-          contents: prompt,
-        });
-        result = response.text;
+        const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash-exp" });
+        const response = await model.generateContent(prompt);
+        result = response.response.text();
         break;
       }
 
       case 'analyzeImage': {
         const { prompt, imageParts, schema } = payload;
-        const contents = {
-            parts: [{ text: prompt }, ...imageParts]
+        const generationConfig: any = {
+          responseMimeType: "application/json",
+          responseSchema: schema,
         };
-        
-        const response = await ai.models.generateContent({
-            model: "gemini-2.5-flash",
-            contents: contents,
-            config: {
-                responseMimeType: "application/json",
-                responseSchema: schema,
-            },
+
+        const model = genAI.getGenerativeModel({
+          model: "gemini-2.0-flash-exp",
+          generationConfig
         });
-        result = JSON.parse(response.text.trim());
+
+        const parts = [{ text: prompt }, ...imageParts];
+        const response = await model.generateContent(parts);
+        const text = response.response.text();
+        result = JSON.parse(text.trim());
         break;
       }
-      
+
       case 'generateVariant': {
-          const { prompt, schema } = payload;
-          const response = await ai.models.generateContent({
-              model: "gemini-2.5-flash",
-              contents: prompt,
-              config: {
-                  responseMimeType: "application/json",
-                  responseSchema: schema,
-              },
-          });
-          result = JSON.parse(response.text.trim());
-          break;
+        const { prompt, schema } = payload;
+        const generationConfig: any = {
+          responseMimeType: "application/json",
+          responseSchema: schema,
+        };
+
+        const model = genAI.getGenerativeModel({
+          model: "gemini-2.0-flash-exp",
+          generationConfig
+        });
+
+        const response = await model.generateContent(prompt);
+        const text = response.response.text();
+        result = JSON.parse(text.trim());
+        break;
       }
 
       default:

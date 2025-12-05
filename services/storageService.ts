@@ -89,6 +89,22 @@ export const uploadDiagramImage = async (base64Image: string, filename: string):
 };
 
 /**
+ * Upload raw XObject image (from PDF) to Supabase Storage
+ */
+export const uploadXObjectImage = async (base64Image: string, filename: string): Promise<string> => {
+    const base64Data = base64Image.replace(/^data:image\/\w+;base64,/, '');
+    const byteCharacters = atob(base64Data);
+    const byteNumbers = new Array(byteCharacters.length);
+    for (let i = 0; i < byteCharacters.length; i++) {
+        byteNumbers[i] = byteCharacters.charCodeAt(i);
+    }
+    const byteArray = new Uint8Array(byteNumbers);
+    const blob = new Blob([byteArray], { type: 'image/jpeg' });
+    const path = `xobjects/${filename}`;
+    return uploadToStorage(blob, path);
+};
+
+/**
  * Generate a unique filename using timestamp and random string
  * @param extension - File extension (e.g., 'jpg', 'txt')
  * @returns Unique filename

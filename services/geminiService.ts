@@ -319,6 +319,13 @@ export const analyzeQuestionsFromImages = async (images: string[], subjectHint?:
     const prompt = `
         You are an expert exam parser for Electrical Engineering in Korea.
         Analyze the provided images of exam papers and extract multiple-choice questions.
+        
+        **CRITICAL INSTRUCTION - READ CAREFULLY**:
+        You MUST extract ALL questions visible in the image. Do NOT skip or miss ANY questions.
+        Scan the ENTIRE image systematically from top to bottom.
+        If you see 10 questions, extract all 10. If you see 20 questions, extract all 20.
+        Each question typically starts with a number followed by a period (e.g., "1.", "2.", "3.").
+        Continue scanning until you reach the end of the image. Do not stop after extracting just a few questions.
         ${subjectHint ? `\n        **IMPORTANT**: The user has specified that these questions belong to the subject: "${subjectHint}". Please use this subject for all extracted questions unless it is clearly incorrect.\n` : ''}
         **Instructions:**
         1. **Language**: ALL output (Question, Options, Explanation, Subject) MUST be in KOREAN (한국어).
@@ -419,6 +426,21 @@ export const analyzeQuestionsFromImages = async (images: string[], subjectHint?:
             if (processedQ.diagramBounds && !hasKeyword) {
                 console.log(`[Rule-Based] Question ${match ? match[1] : 'unknown'}: Removed false positive diagram (No keywords found).`);
                 processedQ.diagramBounds = undefined;
+            }
+
+            // 3. Add diagram indicator to questionText if diagramBounds exists
+            if (processedQ.diagramBounds && !processedQ.questionText.includes('[다이어그램]')) {
+                // Insert diagram indicator after question number
+                if (match) {
+                    // Format: "1. [다이어그램] 다음 중..."
+                    processedQ.questionText = processedQ.questionText.replace(
+                        /^(\d+\.\s*)/,
+                        '$1[다이어그램] '
+                    );
+                } else {
+                    // No question number, prepend to text
+                    processedQ.questionText = '[다이어그램] ' + processedQ.questionText;
+                }
             }
 
             return processedQ;
