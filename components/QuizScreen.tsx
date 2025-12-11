@@ -7,6 +7,14 @@ import { quizApi } from '../services/quizApi';
 import { generateAIExplanation, generateFiveVariants } from '../services/geminiService';
 import FormattedText from './FormattedText'; // FormattedText 컴포넌트 임포트
 
+interface Phase1CompletePayload {
+  subject: string;
+  accuracy: number;
+  totalQuestions: number;
+  correctCount: number;
+  timestamp: string;
+}
+
 interface QuizScreenProps {
   questions: QuestionModel[];
   onFinish: () => void;
@@ -15,9 +23,11 @@ interface QuizScreenProps {
   onStartVariantQuiz?: (questions: QuestionModel[]) => void;
   initialSolvedRecords?: Record<number, import('../types').UserQuizRecord>;
   examDuration?: number; // Duration in minutes for timed exams (e.g., 150 for mock test)
+  isPhase1?: boolean;
+  onPhase1Complete?: (payload: Phase1CompletePayload) => void;
 }
 
-const QuizScreen: React.FC<QuizScreenProps> = ({ questions, onFinish, title, session, onStartVariantQuiz, initialSolvedRecords, examDuration }) => {
+const QuizScreen: React.FC<QuizScreenProps> = ({ questions, onFinish, title, session, onStartVariantQuiz, initialSolvedRecords, examDuration, isPhase1 = false, onPhase1Complete }) => {
   // ----------------------------------------------------
   // 1. 상태 관리
   // ----------------------------------------------------
@@ -109,29 +119,62 @@ const QuizScreen: React.FC<QuizScreenProps> = ({ questions, onFinish, title, ses
 
   const currentQuestion = questions[currentQuestionIndex];
   const correctAnswerIndex = currentQuestion.answerIndex;
+  const defaultExplanation = currentQuestion.rationale || currentQuestion.aiExplanation || currentQuestion.hint || '';
+  const phaseSubject = questions[0]?.subject || 'Phase 1';
 
 
   // ----------------------------------------------------
   // 3. 사용자 인터랙션 핸들러
   // ----------------------------------------------------
 
-  const handleAnswerSelect = (index: number) => {
-    if (isAnswerChecked) return; // 정답 확인 후에는 선택 불가
-    setSelectedAnswer(index);
-  };
+  const emitPhase1Result = useCallback(() => {
+    if (!isPhase1 || !onPhase1Complete) return;
+    const totalQuestions = questions.length;
+    if (totalQuestions === 0) return;
+    let correctCount = 0;
+    questions.forEach((question, idx) => {
+      if (sessionAnswers[idx] === question.answerIndex) {
+        correctCount += 1;
+      }
+    });
+    const accuracy = totalQuestions > 0 ? (correctCount / totalQuestions) * 100 : 0;
+    onPhase1Complete({
+      subject: phaseSubject,
+      accuracy,
+      totalQuestions,
+      correctCount,
+      timestamp: new Date().toISOString()
+    });
+  }, [isPhase1, onPhase1Complete, questions, sessionAnswers, phaseSubject]);
 
-  const handleCheckAnswer = () => {
-    if (selectedAnswer === null || isAnswerChecked) return;
-
+  const finalizeAnswer = (answerIndex: number) => {
+    if (isAnswerChecked) return;
     setIsAnswerChecked(true);
-    setSessionAnswers(prev => ({ ...prev, [currentQuestionIndex]: selectedAnswer }));
+    setSessionAnswers(prev => ({ ...prev, [currentQuestionIndex]: answerIndex }));
 
     // 정답 기록 저장
     quizApi.saveRecord({
       questionId: currentQuestion.id,
-      userAnswerIndex: selectedAnswer,
-      isCorrect: selectedAnswer === correctAnswerIndex,
+      userAnswerIndex: answerIndex,
+      isCorrect: answerIndex === correctAnswerIndex,
     }, session.user.id);
+
+    if (isPhase1 && defaultExplanation) {
+      setShowHint(true);
+    }
+  };
+
+  const handleAnswerSelect = (index: number) => {
+    if (isAnswerChecked) return; // 정답 확인 후에는 선택 불가
+    setSelectedAnswer(index);
+    if (isPhase1) {
+      finalizeAnswer(index);
+    }
+  };
+
+  const handleCheckAnswer = () => {
+    if (selectedAnswer === null || isAnswerChecked) return;
+    finalizeAnswer(selectedAnswer);
   };
 
   const handleRelearn = () => {
@@ -148,6 +191,7 @@ const QuizScreen: React.FC<QuizScreenProps> = ({ questions, onFinish, title, ses
     if (currentQuestionIndex < questions.length - 1) {
       setCurrentQuestionIndex(currentQuestionIndex + 1);
     } else {
+      emitPhase1Result();
       onFinish(); // 마지막 문제라면 종료
     }
   };
@@ -397,6 +441,13 @@ const QuizScreen: React.FC<QuizScreenProps> = ({ questions, onFinish, title, ses
                 정답은 <span className="font-bold">{correctAnswerIndex + 1}번</span>입니다.
               </div>
             </div>
+
+            {isPhase1 && defaultExplanation && (
+              <div className="p-4 bg-white dark:bg-slate-800 border border-emerald-200 dark:border-emerald-700 rounded-xl text-sm leading-relaxed break-words overflow-wrap-anywhere shadow-sm">
+                <h4 className="font-bold mb-2 text-emerald-700 dark:text-emerald-300">개념 설명</h4>
+                <FormattedText text={defaultExplanation} />
+              </div>
+            )}
 
             <div className="flex gap-2 overflow-x-auto pb-2">
               <button

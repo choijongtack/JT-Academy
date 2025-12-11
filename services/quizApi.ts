@@ -7,6 +7,7 @@ import {
   SaveCertificationStandardInput
 } from '../types';
 import { supabase } from './supabaseClient';
+import { wrongAnswerService } from './wrongAnswerService';
 import { subjects, getSubjectsByCertification, SUBJECT_TOPICS, CERTIFICATION_SUBJECTS } from '../constants';
 
 const MISSING_STANDARD_TABLE_HINT =
@@ -118,6 +119,76 @@ export const quizApi = {
     }));
   },
 
+  getQuestionsForPhase1: async ({ subject, certification }: { subject: string; certification?: string }): Promise<QuestionModel[]> => {
+    const allQuestions = await quizApi.loadQuestions({ subject, certification });
+    const limit = 20;
+    if (allQuestions.length <= limit) {
+      return allQuestions;
+    }
+
+    const grouped = new Map<string, QuestionModel[]>();
+    allQuestions.forEach(question => {
+      const key = question.topicCategory || '기타';
+      if (!grouped.has(key)) {
+        grouped.set(key, []);
+      }
+      grouped.get(key)!.push(question);
+    });
+
+    grouped.forEach(list => {
+      list.sort((a, b) => {
+        const freqDiff = (b.frequency ?? 0) - (a.frequency ?? 0);
+        if (freqDiff !== 0) return freqDiff;
+        return Math.random() - 0.5;
+      });
+    });
+
+    const topicOrder = Array.from(grouped.entries())
+      .sort((a, b) => ((b[1][0]?.frequency ?? 0) - (a[1][0]?.frequency ?? 0)))
+      .map(([key]) => key);
+
+    const selected: QuestionModel[] = [];
+    let safety = 0;
+
+    while (selected.length < limit && safety < limit * 5) {
+      let addedInRound = false;
+      for (const topic of topicOrder) {
+        if (selected.length >= limit) {
+          break;
+        }
+        const pool = grouped.get(topic);
+        if (pool && pool.length > 0) {
+          const nextQuestion = pool.shift();
+          if (nextQuestion) {
+            selected.push(nextQuestion);
+            addedInRound = true;
+          }
+        }
+      }
+
+      if (!addedInRound) {
+        break;
+      }
+
+      safety += 1;
+    }
+
+    if (selected.length < limit) {
+      const remainder = Array.from(grouped.values())
+        .flat()
+        .sort((a, b) => ((b.frequency ?? 0) - (a.frequency ?? 0)) || Math.random() - 0.5);
+
+      for (const question of remainder) {
+        if (selected.length >= limit) break;
+        selected.push(question);
+      }
+    }
+
+    return selected
+      .slice(0, limit)
+      .sort(() => 0.5 - Math.random());
+  },
+
   getTopicStatistics: async (subject?: string): Promise<import('../types').TopicStats[]> => {
     const questions = await quizApi.loadQuestions({ subject });
 
@@ -199,36 +270,9 @@ export const quizApi = {
     if (recordError) console.error('Error saving record:', recordError);
 
     if (!newRecord.is_correct) {
-      // Check if a wrong answer record already exists
-      const { data: existing, error: selectError } = await supabase
-        .from('wrong_answers')
-        .select('id, wrong_count')
-        .eq('user_id', userId)
-        .eq('question_id', record.questionId)
-        .single();
-
-      if (selectError && selectError.code !== 'PGRST116') { // PGRST116: no rows found
-        console.error('Error fetching wrong answer:', selectError);
-        return;
-      }
-
-      if (existing) {
-        // Increment wrong_count
-        const { error: updateError } = await supabase
-          .from('wrong_answers')
-          .update({ wrong_count: existing.wrong_count + 1 })
-          .eq('id', existing.id);
-        if (updateError) console.error('Error updating wrong answer:', updateError);
-      } else {
-        // Create new wrong answer record
-        const { error: insertError } = await supabase.from('wrong_answers').insert({
-          user_id: userId,
-          question_id: record.questionId,
-          added_date: new Date().toISOString(),
-          wrong_count: 1,
-        });
-        if (insertError) console.error('Error inserting wrong answer:', insertError);
-      }
+      wrongAnswerService
+        .upsertWrongAnswer(userId, record.questionId)
+        .catch(error => console.error('Error upserting wrong answer:', error));
     }
   },
 

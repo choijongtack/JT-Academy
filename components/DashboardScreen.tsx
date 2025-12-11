@@ -5,15 +5,28 @@ import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, Responsive
 import { Certification, getSubjectsByCertification } from '../constants';
 import { useMediaQuery } from '../hooks/useMediaQuery';
 
+type PhaseStatusRecord = {
+    history: {
+        accuracy: number;
+        date: string;
+        totalQuestions: number;
+        correctCount: number;
+    }[];
+    ready: boolean;
+};
+
 interface DashboardScreenProps {
     navigate: (screen: Screen) => void;
     startMockTest: () => void;
     session: AuthSession;
     certification: Certification;
+    phaseStatuses: Record<string, PhaseStatusRecord>;
+    canStartPhase2: boolean;
 }
 
-const DashboardScreen: React.FC<DashboardScreenProps> = ({ navigate, startMockTest, session, certification }) => {
+const DashboardScreen: React.FC<DashboardScreenProps> = ({ navigate, startMockTest, session, certification, phaseStatuses, canStartPhase2 }) => {
     const [progress, setProgress] = useState<LearningProgress | null>(null);
+    const [reviewDueCounts, setReviewDueCounts] = useState({ seven: 0, thirty: 0 });
     const isMobile = useMediaQuery('(max-width: 768px)');
 
     const fetchProgress = useCallback(async () => {
@@ -26,6 +39,26 @@ const DashboardScreen: React.FC<DashboardScreenProps> = ({ navigate, startMockTe
     useEffect(() => {
         fetchProgress();
     }, [fetchProgress]);
+
+    useEffect(() => {
+        const fetchDueReviews = async () => {
+            const wrongAnswers = await quizApi.getWrongAnswers(session.user.id);
+            const now = Date.now();
+            let seven = 0;
+            let thirty = 0;
+            wrongAnswers.forEach(item => {
+                const diffDays = (now - item.addedDate.getTime()) / (1000 * 60 * 60 * 24);
+                if (diffDays >= 30) {
+                    thirty += 1;
+                } else if (diffDays >= 7) {
+                    seven += 1;
+                }
+            });
+            setReviewDueCounts({ seven, thirty });
+        };
+
+        fetchDueReviews();
+    }, [session]);
 
     if (!progress) {
         return <div className="text-center p-8">학습 진행율 로딩 중...</div>;
@@ -44,6 +77,27 @@ const DashboardScreen: React.FC<DashboardScreenProps> = ({ navigate, startMockTe
     const totalCorrect = filteredSubjectStats.reduce((acc, s) => acc + s.correct, 0);
     const totalAttempted = filteredSubjectStats.reduce((acc, s) => acc + s.total, 0);
     const accuracy = totalAttempted > 0 ? (totalCorrect / totalAttempted) * 100 : 0;
+
+    const phaseInsights = certSubjects.map(subject => {
+        const subjectStatus = phaseStatuses[subject];
+        const latestAccuracy = subjectStatus?.history?.[0]?.accuracy ?? null;
+        const ready = subjectStatus?.ready ?? false;
+        const subjectMessage = ready
+            ? `${subject} 오답률 ${(latestAccuracy !== null ? (100 - latestAccuracy).toFixed(1) : '—')}% 이하입니다. 다음 과목이나 CBT 모의고사를 진행해 보세요.`
+            : `${subject} 최근 정확도 ${(latestAccuracy ?? 0).toFixed(1)}%. 70% 이상을 3회 연속 달성하면 Phase 2가 열립니다.`;
+
+        return {
+            subject,
+            ready,
+            latestAccuracy,
+            subjectMessage
+        };
+    });
+
+    const firstLockedSubject = certSubjects.find(subject => !(phaseStatuses[subject]?.ready));
+    const motivationalMessage = firstLockedSubject
+        ? `${firstLockedSubject} 정확도를 조금만 더 끌어올려 Phase 2로 전환해 보세요!`
+        : '모든 과목에서 Phase 1 목표를 달성했습니다. 이제 CBT 모의고사와 AI 변형 문제로 실전 감각을 키워보세요.';
 
     return (
         <div className="space-y-8">
@@ -87,6 +141,31 @@ const DashboardScreen: React.FC<DashboardScreenProps> = ({ navigate, startMockTe
                     </div>
                 </div>
             </div>
+
+            {phaseInsights.length > 0 && (
+                <div>
+                    <div className="flex items-center justify-between mb-3">
+                        <h3 className="text-xl font-bold text-slate-800 dark:text-slate-200">Phase 1 → Phase 2 준비도</h3>
+                        <span className="text-sm text-slate-500 dark:text-slate-400">{motivationalMessage}</span>
+                    </div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        {phaseInsights.map(({ subject, ready, latestAccuracy, subjectMessage }) => (
+                            <div key={subject} className="p-4 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 shadow-sm">
+                                <div className="flex items-center justify-between mb-2">
+                                    <span className="font-semibold text-slate-800 dark:text-slate-100">{subject}</span>
+                                    <span className={`text-xs font-bold px-2 py-1 rounded-full ${ready ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-200' : 'bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-200'}`}>
+                                        {ready ? 'Phase 2 준비 완료' : 'Phase 1 진행 중'}
+                                    </span>
+                                </div>
+                                <p className="text-3xl font-bold text-slate-900 dark:text-slate-50 mb-1">
+                                    {latestAccuracy !== null ? `${latestAccuracy.toFixed(1)}%` : '—'}
+                                </p>
+                                <p className="text-sm text-slate-500 dark:text-slate-400">{subjectMessage}</p>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            )}
 
             {filteredSubjectStats.length > 0 && (
                 <div>
@@ -178,7 +257,33 @@ const DashboardScreen: React.FC<DashboardScreenProps> = ({ navigate, startMockTe
                 </div>
             )}
 
-            <div className="space-y-4 pt-4 border-t dark:border-slate-600">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 border-t border-slate-200 dark:border-slate-700 pt-4">
+                <div className="p-4 rounded-xl bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800">
+                    <h4 className="text-sm font-semibold text-amber-800 dark:text-amber-200 mb-2">분산 학습 리마인더</h4>
+                    <p className="text-3xl font-bold text-amber-900 dark:text-amber-100">{reviewDueCounts.seven + reviewDueCounts.thirty}</p>
+                    <p className="text-sm text-amber-800/80 dark:text-amber-200/80">
+                        7일째 복습: {reviewDueCounts.seven}문항 · 30일째 복습: {reviewDueCounts.thirty}문항
+                    </p>
+                </div>
+                <div className="p-4 rounded-xl bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-700">
+                    <h4 className="text-sm font-semibold text-purple-800 dark:text-purple-200 mb-2">AI 변형 문제</h4>
+                    <p className="text-sm text-purple-800/80 dark:text-purple-200/80">
+                        오답 노트 기반으로 조건을 바꾼 문제를 생성해 실전 감각을 높여보세요.
+                    </p>
+                    <button
+                        onClick={() => navigate('ai-variant-generator')}
+                        className="mt-3 w-full bg-purple-600 hover:bg-purple-700 text-white text-sm font-semibold py-2 rounded-lg"
+                    >
+                        AI 변형 문제 생성
+                    </button>
+                </div>
+                <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
+                    <h4 className="text-sm font-semibold text-slate-800 dark:text-slate-200 mb-2">동기 부여 메시지</h4>
+                    <p className="text-sm text-slate-600 dark:text-slate-300">{motivationalMessage}</p>
+                </div>
+            </div>
+
+            <div className="space-y-4 pt-4">
                 <div className="flex flex-col md:flex-row gap-4">
                     <button
                         onClick={() => navigate('subject-select')}
@@ -188,9 +293,10 @@ const DashboardScreen: React.FC<DashboardScreenProps> = ({ navigate, startMockTe
                     </button>
                     <button
                         onClick={startMockTest}
-                        className="w-full md:flex-1 bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-4 rounded-lg transition-transform transform hover:scale-105"
+                        disabled={!canStartPhase2}
+                        className={`w-full md:flex-1 font-bold py-3 px-4 rounded-lg transition-transform transform hover:scale-105 ${canStartPhase2 ? 'bg-blue-600 hover:bg-blue-700 text-white' : 'bg-slate-400 text-white cursor-not-allowed'}`}
                     >
-                        모의고사 시작
+                        CBT 모의고사 시작
                     </button>
                     <button
                         onClick={() => navigate('wrong-note')}
@@ -200,6 +306,11 @@ const DashboardScreen: React.FC<DashboardScreenProps> = ({ navigate, startMockTe
                         오답 노트 학습 ({progress.totalWrongAnswers})
                     </button>
                 </div>
+                {!canStartPhase2 && (
+                    <p className="text-xs text-slate-500 dark:text-slate-400">
+                        각 과목에서 정답률 70% 이상을 3회 연속 달성하면 CBT 모의고사가 활성화됩니다.
+                    </p>
+                )}
             </div>
         </div>
     );

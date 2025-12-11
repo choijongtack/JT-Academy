@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import { Screen, QuestionModel, AuthSession } from './types';
 import DashboardScreen from './components/DashboardScreen';
 import QuizScreen from './components/QuizScreen';
@@ -12,7 +12,27 @@ import { quizApi } from './services/quizApi';
 import { supabase } from './services/supabaseClient';
 import { isAdmin } from './services/authService';
 import { useMediaQuery } from './hooks/useMediaQuery';
-import { Certification, CERTIFICATIONS } from './constants';
+import { Certification, CERTIFICATIONS, getSubjectsByCertification } from './constants';
+
+type PhaseHistoryEntry = {
+  accuracy: number;
+  date: string;
+  totalQuestions: number;
+  correctCount: number;
+};
+
+type SubjectPhaseStatus = {
+  history: PhaseHistoryEntry[];
+  ready: boolean;
+};
+
+type Phase1ResultPayload = {
+  subject: string;
+  accuracy: number;
+  totalQuestions: number;
+  correctCount: number;
+  timestamp: string;
+};
 
 
 const App: React.FC = () => {
@@ -26,9 +46,22 @@ const App: React.FC = () => {
 
   const [initialSolvedRecords, setInitialSolvedRecords] = useState<Record<number, import('./types').UserQuizRecord>>({});
   const [isMockTest, setIsMockTest] = useState(false);
+  const [isPhase1Mode, setIsPhase1Mode] = useState(false);
   const [showLanding, setShowLanding] = useState(true);
   const [authMode, setAuthMode] = useState<'login' | 'signup'>('login');
+  const [phaseStatuses, setPhaseStatuses] = useState<Record<string, SubjectPhaseStatus>>({});
+  const [phaseStatusReady, setPhaseStatusReady] = useState(false);
   const isMobile = useMediaQuery('(max-width: 768px)');
+  const phaseStatusStorageKey = useMemo(() => {
+    if (!session) return null;
+    return `phase-status:${session.user.id}:${selectedCertification}`;
+  }, [session, selectedCertification]);
+
+  const subjectsForCert = useMemo(() => getSubjectsByCertification(selectedCertification), [selectedCertification]);
+  const canStartPhase2 = useMemo(() => {
+    if (subjectsForCert.length === 0) return false;
+    return subjectsForCert.every(subject => phaseStatuses[subject]?.ready);
+  }, [phaseStatuses, subjectsForCert]);
 
   const containerClasses = isMobile
     ? 'min-h-screen w-full px-4 py-4 flex flex-col items-center bg-slate-50 dark:bg-slate-900'
@@ -57,6 +90,32 @@ const App: React.FC = () => {
   }, [selectedCertification]);
 
   useEffect(() => {
+    if (!phaseStatusStorageKey) {
+      setPhaseStatuses({});
+      setPhaseStatusReady(false);
+      return;
+    }
+    setPhaseStatusReady(false);
+    const raw = localStorage.getItem(phaseStatusStorageKey);
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw);
+        setPhaseStatuses(parsed);
+      } catch {
+        setPhaseStatuses({});
+      }
+    } else {
+      setPhaseStatuses({});
+    }
+    setPhaseStatusReady(true);
+  }, [phaseStatusStorageKey]);
+
+  useEffect(() => {
+    if (!phaseStatusStorageKey || !phaseStatusReady) return;
+    localStorage.setItem(phaseStatusStorageKey, JSON.stringify(phaseStatuses));
+  }, [phaseStatuses, phaseStatusStorageKey, phaseStatusReady]);
+
+  useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session);
       setIsCheckingSession(false);
@@ -69,30 +128,40 @@ const App: React.FC = () => {
         setQuizQuestions([]);
         setQuizTitle('');
         setInitialSolvedRecords({});
+        setIsPhase1Mode(false);
+        setPhaseStatuses({});
+        setPhaseStatusReady(false);
       }
     });
 
     return () => subscription.unsubscribe();
   }, []);
 
-  const navigate = (screen: Screen) => {
+  const navigate = useCallback((screen: Screen) => {
+    console.log('[App] navigating to:', screen);
     setCurrentScreen(screen);
-  };
+  }, []);
 
   const startMockTest = useCallback(async () => {
     if (!session) return;
+    if (!canStartPhase2) {
+      alert('Phase 1 목표(과목별 70% 이상 3회)를 달성하면 CBT 모의고사를 진행할 수 있습니다.');
+      return;
+    }
     setQuizTitle("모의고사");
     setIsMockTest(true);
+    setIsPhase1Mode(false);
     const questions = await quizApi.generateMockTest(100, selectedCertification);
     setQuizQuestions(questions);
     setInitialSolvedRecords({});
     setQuizReturnScreen('dashboard');
     setCurrentScreen('quiz');
-  }, [session, selectedCertification]);
+  }, [session, selectedCertification, canStartPhase2]);
 
   const startWrongAnswerReview = useCallback(async (questionId: number) => {
     if (!session) return;
     setQuizTitle("오답노트 복습");
+    setIsPhase1Mode(false);
     const wrongAnswers = await quizApi.getWrongAnswers(session.user.id);
     const wrongQuestionIds = wrongAnswers.map(wa => wa.questionId);
 
@@ -121,6 +190,7 @@ const App: React.FC = () => {
     if (!session) return;
     setQuizTitle(topic ? `${subject} - ${topic}` : subject);
     setIsMockTest(false);
+    setIsPhase1Mode(false);
 
     // Load questions
     const questions = await quizApi.loadQuestions({ subject, topic, certification: selectedCertification });
@@ -143,13 +213,58 @@ const App: React.FC = () => {
     setCurrentScreen('quiz');
   }, [session, selectedCertification]);
 
+  const startPhase1SubjectQuiz = useCallback(async (subject: string) => {
+    if (!session) return;
+    setQuizTitle(`${subject} 기초다지기`);
+    setIsMockTest(false);
+    setIsPhase1Mode(true);
+    const questions = await quizApi.getQuestionsForPhase1({ subject, certification: selectedCertification });
+    setQuizQuestions(questions);
+    setInitialSolvedRecords({});
+    setQuizReturnScreen('subject-select');
+    setCurrentScreen('quiz');
+  }, [session, selectedCertification]);
+
+  const handlePhase1Result = useCallback((result: Phase1ResultPayload) => {
+    if (!result.subject || result.subject === 'Phase 1') return;
+    setPhaseStatuses(prev => {
+      const prevState = prev[result.subject] || { history: [], ready: false };
+      const updatedHistory = [
+        {
+          accuracy: result.accuracy,
+          date: result.timestamp,
+          totalQuestions: result.totalQuestions,
+          correctCount: result.correctCount
+        },
+        ...prevState.history
+      ].slice(0, 5);
+
+      const recentThree = updatedHistory.slice(0, 3);
+      const ready = recentThree.length === 3 && recentThree.every(entry => entry.accuracy >= 70);
+
+      return {
+        ...prev,
+        [result.subject]: {
+          history: updatedHistory,
+          ready
+        }
+      };
+    });
+  }, []);
+
   const handleStartVariantQuiz = useCallback((questions: QuestionModel[]) => {
+    setIsPhase1Mode(false);
     setQuizTitle("AI 응용 문제 풀기");
     setQuizQuestions(questions);
     setInitialSolvedRecords({});
     setQuizReturnScreen('dashboard');
     setCurrentScreen('quiz');
   }, []);
+
+  const handleQuizFinish = useCallback(() => {
+    setIsPhase1Mode(false);
+    navigate(quizReturnScreen);
+  }, [navigate, quizReturnScreen]);
 
   const handleLogout = async () => {
     await supabase.auth.signOut();
@@ -162,17 +277,24 @@ const App: React.FC = () => {
       case 'quiz':
         return <QuizScreen
           questions={quizQuestions}
-          onFinish={() => navigate(quizReturnScreen)}
+          onFinish={handleQuizFinish}
           title={quizTitle}
           session={session}
           onStartVariantQuiz={handleStartVariantQuiz}
           initialSolvedRecords={initialSolvedRecords}
           examDuration={isMockTest ? 150 : undefined}
+          isPhase1={isPhase1Mode}
+          onPhase1Complete={handlePhase1Result}
         />;
       case 'wrong-note':
         return <WrongNoteScreen navigate={navigate} startReview={startWrongAnswerReview} session={session} onStartVariantQuiz={handleStartVariantQuiz} />;
       case 'subject-select':
-        return <SubjectSelectionScreen navigate={navigate} onSelectSubject={startSubjectQuiz} certification={selectedCertification} />;
+        return <SubjectSelectionScreen
+          navigate={navigate}
+          onSelectSubject={startSubjectQuiz}
+          onStartPhase1={startPhase1SubjectQuiz}
+          certification={selectedCertification}
+        />;
       case 'ai-variant-generator':
         return <AiVariantGeneratorScreen navigate={navigate} session={session} certification={selectedCertification} onQuestionsUpdated={() => {
         }} />;
@@ -180,7 +302,14 @@ const App: React.FC = () => {
         return <AdminQuestionManagementScreen navigate={navigate} session={session} />;
       case 'dashboard':
       default:
-        return <DashboardScreen navigate={navigate} startMockTest={startMockTest} session={session} certification={selectedCertification} />;
+        return <DashboardScreen
+          navigate={navigate}
+          startMockTest={startMockTest}
+          session={session}
+          certification={selectedCertification}
+          phaseStatuses={phaseStatuses}
+          canStartPhase2={canStartPhase2}
+        />;
     }
   };
 
@@ -191,10 +320,6 @@ const App: React.FC = () => {
       </div>
     );
   }
-
-
-
-  // ... (existing code)
 
   if (!session) {
     if (showLanding) {
@@ -282,7 +407,10 @@ const App: React.FC = () => {
                 문제 관리
               </button>
               <button
-                onClick={() => navigate('ai-variant-generator')}
+                onClick={() => {
+                  console.log('[App] Upload button clicked');
+                  navigate('ai-variant-generator');
+                }}
                 className="bg-yellow-500 hover:bg-yellow-600 text-white font-semibold py-1 px-3 rounded-md transition-colors flex items-center"
               >
                 <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 mr-1.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -296,7 +424,7 @@ const App: React.FC = () => {
             {session.user.email}
           </span>
           {currentScreen === 'quiz' ? (
-            <button onClick={() => navigate(quizReturnScreen)} className="bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-200 font-semibold py-1 px-3 rounded-md transition-colors">
+            <button onClick={() => { setIsPhase1Mode(false); navigate(quizReturnScreen); }} className="bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-200 font-semibold py-1 px-3 rounded-md transition-colors">
               퀴즈 종료
             </button>
           ) : currentScreen === 'subject-select' || currentScreen === 'wrong-note' || currentScreen === 'ai-variant-generator' || currentScreen === 'admin-questions' ? (

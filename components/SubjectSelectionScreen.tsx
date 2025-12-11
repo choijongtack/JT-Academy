@@ -5,11 +5,12 @@ import { SUBJECT_TOPICS, getSubjectsByCertification, Certification } from '../co
 
 interface SubjectSelectionScreenProps {
   onSelectSubject: (subject: string, topic?: string) => void;
+  onStartPhase1: (subject: string) => void;
   navigate: (screen: Screen) => void;
   certification: Certification;
 }
 
-const SubjectSelectionScreen: React.FC<SubjectSelectionScreenProps> = ({ onSelectSubject, navigate, certification }) => {
+const SubjectSelectionScreen: React.FC<SubjectSelectionScreenProps> = ({ onSelectSubject, onStartPhase1, navigate, certification }) => {
   const [selectedSubject, setSelectedSubject] = useState<string | null>(null);
   const [topicStats, setTopicStats] = useState<TopicStats[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -74,6 +75,17 @@ const SubjectSelectionScreen: React.FC<SubjectSelectionScreenProps> = ({ onSelec
           </div>
         ) : (
           <div className="grid gap-4">
+            <button
+              onClick={() => onStartPhase1(selectedSubject)}
+              className="w-full text-left p-4 rounded-lg bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-800 hover:bg-emerald-100 dark:hover:bg-emerald-900/40 transition-colors shadow-sm"
+            >
+              <div className="flex items-center justify-between">
+                <span className="font-bold text-emerald-700 dark:text-emerald-300">기초다지기</span>
+                <span className="text-xs font-semibold text-emerald-700 dark:text-emerald-200">Phase 1 · 20문항</span>
+              </div>
+              <p className="mt-1 text-sm text-emerald-700/80 dark:text-emerald-200/80">과목별 기본기를 20문항으로 빠르게 다집니다.</p>
+            </button>
+
             <button
               onClick={() => onSelectSubject(selectedSubject)}
               className="w-full text-left p-4 rounded-lg bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 hover:bg-blue-100 dark:hover:bg-blue-900/40 transition-colors shadow-sm"

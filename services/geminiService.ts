@@ -428,6 +428,7 @@ export const analyzeQuestionsFromImages = async (images: string[], subjectHint?:
                 processedQ.diagramBounds = undefined;
             }
 
+
             // 3. Add diagram indicator to questionText if diagramBounds exists
             if (processedQ.diagramBounds && !processedQ.questionText.includes('[다이어그램]')) {
                 // Insert diagram indicator after question number
