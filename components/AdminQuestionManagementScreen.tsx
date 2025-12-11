@@ -1,8 +1,25 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { QuestionModel, AuthSession } from '../types';
 import { quizApi } from '../services/quizApi';
 import { isAdmin } from '../services/authService';
 import { CERTIFICATIONS, CERTIFICATION_SUBJECTS, SUBJECT_TOPICS } from '../constants';
+
+const normalizeKey = (value?: string | null) => (value ?? '').replace(/\s+/g, ' ').trim();
+
+const normalizeSubjectValue = (subject?: string | null): string => {
+    const trimmed = normalizeKey(subject);
+    return trimmed.length > 0 ? trimmed : '기타';
+};
+
+const normalizeTopicValue = (topic?: string | null): string => {
+    const trimmed = normalizeKey(topic);
+    return trimmed.length > 0 ? trimmed : '기타';
+};
+
+type ManagedQuestion = QuestionModel & {
+    normalizedSubject: string;
+    normalizedTopic: string;
+};
 
 interface AdminQuestionManagementScreenProps {
     session: AuthSession;
@@ -10,8 +27,8 @@ interface AdminQuestionManagementScreenProps {
 }
 
 const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps> = ({ session, navigate }) => {
-    const [questions, setQuestions] = useState<QuestionModel[]>([]);
-    const [filteredQuestions, setFilteredQuestions] = useState<QuestionModel[]>([]);
+    const [questions, setQuestions] = useState<ManagedQuestion[]>([]);
+    const [filteredQuestions, setFilteredQuestions] = useState<ManagedQuestion[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [successMessage, setSuccessMessage] = useState<string | null>(null);
@@ -48,8 +65,17 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
         setError(null);
         try {
             const allQuestions = await quizApi.getAllQuestions();
-            setQuestions(allQuestions);
-            setFilteredQuestions(allQuestions);
+            const normalizedQuestions: ManagedQuestion[] = allQuestions.map(question => {
+                const normalizedSubject = normalizeSubjectValue(question.subject);
+                const normalizedTopic = normalizeTopicValue(question.topicCategory);
+                return {
+                    ...question,
+                    normalizedSubject,
+                    normalizedTopic
+                };
+            });
+            setQuestions(normalizedQuestions);
+            setFilteredQuestions(normalizedQuestions);
         } catch (err) {
             setError('문제 목록을 불러오는데 실패했습니다.');
             console.error(err);
@@ -67,7 +93,7 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
         let filtered = [...questions];
 
         if (filterSubject) {
-            filtered = filtered.filter(q => q.subject === filterSubject);
+            filtered = filtered.filter(q => q.normalizedSubject === filterSubject);
         }
         if (filterCertification) {
             filtered = filtered.filter(q => q.certification === filterCertification);
@@ -77,7 +103,7 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
             filtered = filtered.filter(q => q.year === yearNum);
         }
         if (filterTopic) {
-            filtered = filtered.filter(q => q.topicCategory === filterTopic);
+            filtered = filtered.filter(q => q.normalizedTopic === filterTopic);
         }
         if (searchText) {
             const search = searchText.toLowerCase();
@@ -94,18 +120,13 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
     // Get unique years
     const uniqueYears = Array.from(new Set(questions.map(q => q.year))).sort((a, b) => b - a);
 
-    // Get available topics based on selected subject
-    const availableTopics = filterSubject && SUBJECT_TOPICS[filterSubject]
-        ? SUBJECT_TOPICS[filterSubject]
-        : [];
-
     // Pagination
     const totalPages = Math.ceil(filteredQuestions.length / itemsPerPage);
     const startIndex = (currentPage - 1) * itemsPerPage;
     const paginatedQuestions = filteredQuestions.slice(startIndex, startIndex + itemsPerPage);
 
     // Handle edit
-    const startEdit = (question: QuestionModel) => {
+    const startEdit = (question: ManagedQuestion) => {
         // Verify the question exists in the current list
         const exists = questions.find(q => q.id === question.id);
         if (!exists) {
@@ -115,10 +136,10 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
 
         setEditingId(question.id);
         setEditForm({
-            subject: question.subject,
+            subject: question.normalizedSubject === '기타' ? '' : question.normalizedSubject,
             certification: question.certification,
             year: question.year,
-            topicCategory: question.topicCategory
+            topicCategory: question.normalizedTopic === '기타' ? '' : question.normalizedTopic
         });
     };
 
@@ -189,10 +210,44 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
         }
     };
 
-    // Get available subjects based on selected certification
-    const availableSubjects = filterCertification && CERTIFICATION_SUBJECTS[filterCertification as keyof typeof CERTIFICATION_SUBJECTS]
-        ? CERTIFICATION_SUBJECTS[filterCertification as keyof typeof CERTIFICATION_SUBJECTS]
-        : Object.keys(SUBJECT_TOPICS);
+    const availableSubjects = useMemo(() => {
+        const pool = filterCertification
+            ? questions.filter(q => q.certification === filterCertification)
+            : questions;
+        const set = new Set<string>();
+        pool.forEach(q => set.add(q.normalizedSubject));
+        const subjects = Array.from(set);
+
+        // Define global order based on constants
+        const globalSubjectOrder = Object.values(CERTIFICATION_SUBJECTS).flat();
+
+        return subjects.sort((a, b) => {
+            const indexA = globalSubjectOrder.indexOf(a);
+            const indexB = globalSubjectOrder.indexOf(b);
+
+            // Both in list: compare indices
+            if (indexA !== -1 && indexB !== -1) {
+                return indexA - indexB;
+            }
+            // Only A in list: A comes first
+            if (indexA !== -1) return -1;
+            // Only B in list: B comes first
+            if (indexB !== -1) return 1;
+            // Neither in list: sort alphabetically
+            return a.localeCompare(b);
+        });
+    }, [questions, filterCertification]);
+
+    const availableTopics = useMemo(() => {
+        if (!filterSubject) return [];
+        const pool = questions.filter(q => {
+            if (filterCertification && q.certification !== filterCertification) return false;
+            return q.normalizedSubject === filterSubject;
+        });
+        const set = new Set<string>();
+        pool.forEach(q => set.add(q.normalizedTopic));
+        return Array.from(set);
+    }, [questions, filterCertification, filterSubject]);
 
     if (loading) {
         return <div className="text-center p-8">로딩 중...</div>;
@@ -394,20 +449,17 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
                                     </td>
                                     <td className="px-4 py-3 text-sm text-slate-900 dark:text-slate-100">
                                         {editingId === question.id ? (
-                                            <select
+                                            <input
+                                                type="text"
                                                 value={editForm.subject || ''}
-                                                onChange={(e) => setEditForm({ ...editForm, subject: e.target.value, topicCategory: '' })}
+                                                onChange={(e) => setEditForm({ ...editForm, subject: e.target.value })}
                                                 className="w-full px-2 py-1 border rounded bg-white dark:bg-slate-700"
-                                            >
-                                                {(editForm.certification && CERTIFICATION_SUBJECTS[editForm.certification as keyof typeof CERTIFICATION_SUBJECTS]
-                                                    ? CERTIFICATION_SUBJECTS[editForm.certification as keyof typeof CERTIFICATION_SUBJECTS]
-                                                    : Object.keys(SUBJECT_TOPICS)
-                                                ).map(subject => (
-                                                    <option key={subject} value={subject}>{subject}</option>
-                                                ))}
-                                            </select>
+                                                placeholder="과목 입력"
+                                            />
                                         ) : (
-                                            question.subject
+                                            question.normalizedSubject === '기타' && question.subject
+                                                ? `기타 (${question.subject})`
+                                                : question.normalizedSubject
                                         )}
                                     </td>
                                     <td className="px-4 py-3 text-sm text-slate-900 dark:text-slate-100">
@@ -424,19 +476,17 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
                                     </td>
                                     <td className="px-4 py-3 text-sm text-slate-900 dark:text-slate-100">
                                         {editingId === question.id ? (
-                                            <select
+                                            <input
+                                                type="text"
                                                 value={editForm.topicCategory || ''}
                                                 onChange={(e) => setEditForm({ ...editForm, topicCategory: e.target.value })}
                                                 className="w-full px-2 py-1 border rounded bg-white dark:bg-slate-700"
-                                                disabled={!editForm.subject}
-                                            >
-                                                <option value="">선택</option>
-                                                {editForm.subject && SUBJECT_TOPICS[editForm.subject]?.map(topic => (
-                                                    <option key={topic} value={topic}>{topic}</option>
-                                                ))}
-                                            </select>
+                                                placeholder="주제 입력"
+                                            />
                                         ) : (
-                                            question.topicCategory || '-'
+                                            question.normalizedTopic === '기타' && question.topicCategory
+                                                ? `기타 (${question.topicCategory})`
+                                                : question.normalizedTopic
                                         )}
                                     </td>
                                     <td className="px-4 py-3 text-sm text-slate-900 dark:text-slate-100 max-w-xs truncate">

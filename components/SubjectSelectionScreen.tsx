@@ -27,7 +27,7 @@ const SubjectSelectionScreen: React.FC<SubjectSelectionScreenProps> = ({ onSelec
   const loadTopics = async (subject: string) => {
     setIsLoading(true);
     try {
-      const stats = await quizApi.getTopicStatistics(subject);
+      const stats = await quizApi.getTopicStatistics(subject, certification);
       setTopicStats(stats);
     } catch (error) {
       console.error('Failed to load topics:', error);

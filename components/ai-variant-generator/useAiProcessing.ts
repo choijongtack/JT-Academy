@@ -40,7 +40,8 @@ import {
     fetchImageAsBase64,
     validateExamYearValue,
     enforceSubjectQuestionQuota,
-    SubjectProcessingPackage
+    SubjectProcessingPackage,
+    PagePreview
 } from './utils';
 
 // Types and Interfaces
@@ -86,7 +87,7 @@ const CERTIFICATION_RANGE_TEMPLATES: Record<Certification, Array<Omit<SubjectRan
         { name: '태양광발전 시공', startPage: 3, endPage: 4, questionStart: 41, questionEnd: 60 },
         { name: '태양광발전 운영', startPage: 4, endPage: 5, questionStart: 61, questionEnd: 80 }
     ],
-    '소방설비산업기사(전기)': [
+    '소방설비기사(전기)': [
         { name: '소방원론', startPage: 1, endPage: 2, questionStart: 1, questionEnd: 20 },
         { name: '소방전기 일반', startPage: 2, endPage: 3, questionStart: 21, questionEnd: 40 },
         { name: '소방관계법규', startPage: 3, endPage: 4, questionStart: 41, questionEnd: 60 },
@@ -173,6 +174,8 @@ export const useAiProcessing = ({
     const [subjectRanges, setSubjectRanges] = useState<SubjectRangeConfig[]>(() => createDefaultSubjectRanges(certification));
     const [pendingSubjectPackage, setPendingSubjectPackage] = useState<SubjectProcessingPackage | null>(null);
     const [isSavingSubject, setIsSavingSubject] = useState(false);
+    const [isDiagramReviewOpen, setIsDiagramReviewOpen] = useState(false);
+    const [isDiagramReviewComplete, setIsDiagramReviewComplete] = useState(false);
 
     // --- Year State ---
     const [yearInput, setYearInput] = useState<number | ''>('');
@@ -394,6 +397,8 @@ export const useAiProcessing = ({
         setIsPaused(false);
         setPendingSubjectPackage(null);
         setIsBatchConfirmed(false);
+        setIsDiagramReviewOpen(false);
+        setIsDiagramReviewComplete(false);
         pageImageDataRef.current = new Map();
 
         try {
@@ -492,7 +497,7 @@ export const useAiProcessing = ({
             const diagramMap = new Map<number, { pageIndex: number, bounds: { x: number, y: number, width: number, height: number } }>();
             const totalPages = useTextMode ? totalPdfPages : allImages.length;
 
-            const buildSubjectPackage = (subjectName: string, startIndex: number, questionsSubset: QuestionModel[], previewMetadata: any) => {
+            const buildSubjectPackage = (subjectName: string, startIndex: number, questionsSubset: QuestionModel[], previewMetadata: PagePreview[]) => {
                 const questionCount = questionsSubset.length;
                 const endIndex = startIndex + questionCount;
                 const questionPageEntries = Array.from(pageMap.entries())
@@ -508,6 +513,28 @@ export const useAiProcessing = ({
                     questionDiagramMap: questionDiagramEntries,
                     previewImages: previewMetadata
                 };
+            };
+
+            const collectDiagramPreviewMetadata = (startIndex: number, questionCount: number): PagePreview[] => {
+                const previews: PagePreview[] = [];
+                const seenPages = new Set<number>();
+                const endIndex = startIndex + questionCount;
+                for (let qIdx = startIndex; qIdx < endIndex; qIdx++) {
+                    const match = diagramMap.get(qIdx);
+                    if (!match) continue;
+                    if (seenPages.has(match.pageIndex)) continue;
+                    seenPages.add(match.pageIndex);
+                    const dataUrl = pageImageDataRef.current.get(match.pageIndex) || null;
+                    const imageUrl = pageImageUrlCacheRef.current.get(match.pageIndex) || null;
+                    if (dataUrl || imageUrl) {
+                        previews.push({
+                            pageIndex: match.pageIndex,
+                            dataUrl,
+                            imageUrl
+                        });
+                    }
+                }
+                return previews;
             };
 
             const resolveSubjectSegments = (startPage: number, endPage: number) => {
@@ -658,13 +685,19 @@ export const useAiProcessing = ({
                         savedAt: new Date().toISOString()
                     };
 
+                    const subjectPreviewMetadata = collectDiagramPreviewMetadata(startIndex, enforcedSubjectQuestions.length);
+
                     if (enforcedSubjectQuestions.length > 0) {
-                        const subjectPackage = buildSubjectPackage(subjectName, startIndex, enforcedSubjectQuestions, []);
+                        const subjectPackage = buildSubjectPackage(subjectName, startIndex, enforcedSubjectQuestions, subjectPreviewMetadata);
                         setPendingSubjectPackage(subjectPackage);
                         setIsBatchConfirmed(false);
+                        const hasDiagrams = subjectPackage.questionDiagramMap.length > 0;
+                        setIsDiagramReviewOpen(hasDiagrams);
+                        setIsDiagramReviewComplete(!hasDiagrams);
                     } else {
                         setPendingSubjectPackage(null);
                         setIsBatchConfirmed(true);
+                        setIsDiagramReviewComplete(true);
                     }
 
                     setExtractedQuestions(enforcedSubjectQuestions);
@@ -742,9 +775,13 @@ export const useAiProcessing = ({
                         const subjectPackage = buildSubjectPackage(subjectName, subjectStartIndex, enforcedSubjectQuestions, subjectPreviewMetadata);
                         setPendingSubjectPackage(subjectPackage);
                         setIsBatchConfirmed(false);
+                        const hasDiagrams = subjectPackage.questionDiagramMap.length > 0;
+                        setIsDiagramReviewOpen(hasDiagrams);
+                        setIsDiagramReviewComplete(!hasDiagrams);
                     } else {
                         setPendingSubjectPackage(null);
                         setIsBatchConfirmed(true);
+                        setIsDiagramReviewComplete(true);
                     }
 
                     setExtractedQuestions(enforcedSubjectQuestions);
@@ -789,6 +826,28 @@ export const useAiProcessing = ({
         }
     };
 
+    const openDiagramReview = () => {
+        if (!pendingSubjectPackage || pendingSubjectPackage.questionDiagramMap.length === 0) return;
+        setIsDiagramReviewOpen(true);
+    };
+
+    const closeDiagramReview = () => {
+        setIsDiagramReviewOpen(false);
+    };
+
+    const applyDiagramReview = (updatedEntries: SubjectProcessingPackage['questionDiagramMap']) => {
+        if (!pendingSubjectPackage) return;
+        setPendingSubjectPackage(prev => {
+            if (!prev) return prev;
+            return {
+                ...prev,
+                questionDiagramMap: updatedEntries
+            };
+        });
+        setIsDiagramReviewComplete(true);
+        setIsDiagramReviewOpen(false);
+    };
+
     const waitForResume = () => {
         return new Promise<void>((resolve) => {
             const checkPaused = setInterval(() => {
@@ -830,7 +889,7 @@ export const useAiProcessing = ({
             parent_question_id: question.parentQuestionId ?? null,
             hint: question.hint ?? null,
             rationale: question.rationale ?? null,
-            topic_category: question.topicCategory ?? null,
+            topic_category: question.topicCategory ?? '기타',
             topic_keywords: question.topicKeywords ?? [],
             frequency: question.frequency ?? null,
             difficulty_level: question.difficultyLevel ?? null,
@@ -847,6 +906,10 @@ export const useAiProcessing = ({
         if (isSavingSubject || !pendingSubjectPackage) return;
         const resolvedYear = resolveYearOrAlert();
         if (!resolvedYear) return;
+        if (pendingSubjectPackage.questionDiagramMap.length > 0 && !isDiagramReviewComplete) {
+            setError('Supabase ?€?¥ì œì •ì „ ë„ë©´?¸ ì„¤ì •í•˜ê³  ?–?„ ì¸¡ê²€??ì£¼ì„¸??');
+            return;
+        }
 
         setIsSavingSubject(true);
         setError(null);
@@ -897,6 +960,8 @@ export const useAiProcessing = ({
             setStatusMessage(`${subjectName} 저장 완료!`);
             setIsBatchConfirmed(true);
             setPendingSubjectPackage(null);
+            setIsDiagramReviewComplete(false);
+            setIsDiagramReviewOpen(false);
         } catch (error: any) {
             console.error(error);
             setError(`저장 실패: ${error.message}`);
@@ -951,6 +1016,7 @@ export const useAiProcessing = ({
         // Results
         extractedQuestions,
         generatedVariants,
+        previewImages,
 
         // Subject Flow
         currentSubject,
@@ -961,6 +1027,11 @@ export const useAiProcessing = ({
         isBatchConfirmed,
         isSavingSubject,
         pendingSubjectPackage,
+        isDiagramReviewOpen,
+        isDiagramReviewComplete,
+        openDiagramReview,
+        closeDiagramReview,
+        applyDiagramReview,
 
         // Ranges
         subjectRanges,

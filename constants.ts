@@ -1,11 +1,11 @@
 // 자격증 타입 정의
-export type Certification = '전기기사' | '신재생에너지발전설비기사(태양광)' | '소방설비산업기사(전기)';
+export type Certification = '전기기사' | '신재생에너지발전설비기사(태양광)' | '소방설비기사(전기)';
 
 // 자격증 목록
 export const CERTIFICATIONS: Certification[] = [
     '전기기사',
     '신재생에너지발전설비기사(태양광)',
-    '소방설비산업기사(전기)'
+    '소방설비기사(전기)'
 ];
 
 // 자격증별 과목 매핑
@@ -23,7 +23,7 @@ export const CERTIFICATION_SUBJECTS: Record<Certification, string[]> = {
         '태양광발전 시공',
         '태양광발전 운영'
     ],
-    '소방설비산업기사(전기)': [
+    '소방설비기사(전기)': [
         '소방원론',
         '소방전기 일반',
         '소방관계법규',
@@ -126,7 +126,7 @@ export const SUBJECT_TOPICS: Record<string, string[]> = {
         "시스템 안전관리"
     ],
 
-    // 소방설비산업기사(전기) 과목들
+    // 소방설비기사(전기) 과목들
     "소방원론": [
         "연소이론",
         "화재현상",

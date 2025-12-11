@@ -189,8 +189,8 @@ export const quizApi = {
       .sort(() => 0.5 - Math.random());
   },
 
-  getTopicStatistics: async (subject?: string): Promise<import('../types').TopicStats[]> => {
-    const questions = await quizApi.loadQuestions({ subject });
+  getTopicStatistics: async (subject?: string, certification?: string): Promise<import('../types').TopicStats[]> => {
+    const questions = await quizApi.loadQuestions({ subject, certification });
 
     const topicMap = new Map<string, import('../types').TopicStats>();
 
@@ -330,12 +330,23 @@ export const quizApi = {
   },
 
   getAllQuestions: async (): Promise<QuestionModel[]> => {
-    const { data, error } = await supabase.from('questions').select('*');
+    // Increase limit to ensure we get all questions (Supabase default is often 1000)
+    const { data, error } = await supabase
+      .from('questions')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(5000);
 
     if (error) {
       console.error('Error fetching all questions:', error);
       return [];
     }
+
+    console.log(`[quizApi] getAllQuestions: Fetched ${data.length} questions.`);
+
+    // Debug: check existence of non-empty topics
+    const questionsWithTopics = data.filter(q => q.topic_category && q.topic_category !== '기타').length;
+    console.log(`[quizApi] Questions with valid topics (not '기타'): ${questionsWithTopics}`);
 
     return data.map(item => ({
       id: item.id,
@@ -349,6 +360,10 @@ export const quizApi = {
       parentQuestionId: item.parent_question_id,
       hint: item.hint,
       rationale: item.rationale,
+      topicCategory: item.topic_category, // Direct mapping, relying on UI to handle '기타' fallback
+      topicKeywords: item.topic_keywords,
+      frequency: item.frequency,
+      difficultyLevel: item.difficulty_level,
       imageUrl: item.image_url,
       textFileUrl: item.text_file_url,
       diagramUrl: item.diagram_url,

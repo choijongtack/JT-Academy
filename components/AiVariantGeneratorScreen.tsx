@@ -11,6 +11,8 @@ import { useAiProcessing } from './ai-variant-generator/useAiProcessing';
 import StandardUploadSection from './ai-variant-generator/StandardUploadSection';
 import SubjectSelectionSection from './ai-variant-generator/SubjectSelectionSection';
 import SaveConfirmationDialog from './ai-variant-generator/SaveConfirmationDialog';
+import DiagramReviewModal from './ai-variant-generator/DiagramReviewModal';
+import SubjectRangesSection from './ai-variant-generator/SubjectRangesSection';
 
 interface AiVariantGeneratorScreenProps {
     navigate: (screen: Screen) => void;
@@ -20,6 +22,8 @@ interface AiVariantGeneratorScreenProps {
 }
 
 const AiVariantGeneratorScreen: React.FC<AiVariantGeneratorScreenProps> = ({ navigate, session, certification, onQuestionsUpdated }) => {
+
+    const [selectedSubject, setSelectedSubject] = React.useState<string | null>(null);
 
     // State & Logic from Hook
     const {
@@ -47,7 +51,16 @@ const AiVariantGeneratorScreen: React.FC<AiVariantGeneratorScreenProps> = ({ nav
         isBatchConfirmed,
         isSavingSubject,
         pendingSubjectPackage,
+        isDiagramReviewOpen,
+        isDiagramReviewComplete,
+        openDiagramReview,
+        closeDiagramReview,
+        applyDiagramReview,
         subjectRanges,
+        handleSubjectRangeFieldChange,
+        handleAddSubjectRange,
+        handleRemoveSubjectRange,
+        handleResetSubjectRanges,
 
         // Processing
         isProcessing,
@@ -56,25 +69,14 @@ const AiVariantGeneratorScreen: React.FC<AiVariantGeneratorScreenProps> = ({ nav
         handleProcessStart,
         handleSaveCurrentSubject,
         extractedQuestions,
-        generatedVariants
+        generatedVariants,
+        previewImages
     } = useAiProcessing({
         certification,
-        selectedSubject: null, // We handle selectedSubject inside the hook or pass it if state was hoisted differently
-        // Note: In the refactor, I moved selectedSubject state inside useAiProcessing for simplicity, 
-        // but to support StandardUploadSection which also needs it, we might need to expose set function.
-        // Let's assume useAiProcessing manages it and exposes a setter if needed, or we pass it in.
-        // Correction: I initially put it in the hook args but didn't expose the setter from the hook.
-        // I will update the usage to assume the hook manages it or I'll implement a local state here if shared.
+        selectedSubject,
         session
     });
-
-    // In a perfect refactor, 'selectedSubject' would be shared state. 
-    // To make this work with the split components:
-    // We'll treat the hook as the source of truth for 'selectedSubject' if we added it there, 
-    // OR we keep it local here and pass it down. 
-    // Given the previous hook definition, let's assume we use a local state for 'selectedSubject' 
-    // and pass it to the hook (if the hook accepts dynamic values, which it does via props).
-    const [selectedSubject, setSelectedSubject] = React.useState<string | null>(null);
+    const requiresDiagramReview = Boolean(pendingSubjectPackage?.questionDiagramMap.length);
 
     // Helpers for Drag & Drop
     const handleDragEnter = (e: React.DragEvent) => { e.preventDefault(); e.stopPropagation(); };
@@ -132,7 +134,7 @@ const AiVariantGeneratorScreen: React.FC<AiVariantGeneratorScreenProps> = ({ nav
             )}
 
             {/* Save Confirmation Dialog */}
-            {isPaused && (
+            {isPaused && (!requiresDiagramReview || isDiagramReviewComplete) && (
                 <SaveConfirmationDialog
                     completedSubjects={completedSubjects}
                     pendingSubjects={pendingSubjects}
@@ -140,12 +142,37 @@ const AiVariantGeneratorScreen: React.FC<AiVariantGeneratorScreenProps> = ({ nav
                     isSavingSubject={isSavingSubject}
                     pendingSubjectPackage={pendingSubjectPackage}
                     isYearValid={!shouldShowYearError}
+                    requiresDiagramReview={requiresDiagramReview}
+                    isDiagramReviewComplete={isDiagramReviewComplete}
+                    onOpenDiagramReview={openDiagramReview}
+                    yearInput={yearInput}
+                    onYearChange={(val) => setYearInput(val)}
+                    yearError={yearError}
+                    shouldShowYearError={shouldShowYearError}
                     handleSaveCurrentSubject={handleSaveCurrentSubject}
                     onNext={() => setIsPaused(false)}
                     onCancel={() => {
                         setIsPaused(false);
                         // Trigger cancel logic via hook if exposed, or just reset
                     }}
+                />
+            )}
+            {isPaused && requiresDiagramReview && !isDiagramReviewComplete && (
+                <div className="fixed inset-0 flex items-center justify-center z-40 pointer-events-none">
+                    <div className="bg-white/90 dark:bg-slate-900/90 px-6 py-3 rounded-full text-sm font-semibold text-blue-700 dark:text-blue-200 shadow-lg border border-blue-200 dark:border-blue-800">
+                        도면 검수 완료 후 저장 단계를 진행할 수 있습니다.
+                    </div>
+                </div>
+            )}
+
+            {pendingSubjectPackage && requiresDiagramReview && isDiagramReviewOpen && (
+                <DiagramReviewModal
+                    subjectName={pendingSubjectPackage.subjectName}
+                    questions={pendingSubjectPackage.questions}
+                    diagramAssignments={pendingSubjectPackage.questionDiagramMap}
+                    pagePreviews={pendingSubjectPackage.previewImages}
+                    onClose={closeDiagramReview}
+                    onApply={applyDiagramReview}
                 />
             )}
 
@@ -167,6 +194,14 @@ const AiVariantGeneratorScreen: React.FC<AiVariantGeneratorScreenProps> = ({ nav
                     yearError={yearError}
                     shouldShowYearError={shouldShowYearError}
                     isYearTouched={isYearTouched}
+                />
+                <SubjectRangesSection
+                    selectedSubject={selectedSubject}
+                    subjectRanges={subjectRanges}
+                    onFieldChange={handleSubjectRangeFieldChange}
+                    onAddRange={handleAddSubjectRange}
+                    onRemoveRange={handleRemoveSubjectRange}
+                    onResetRanges={handleResetSubjectRanges}
                 />
 
                 {/* 3. Question File Upload */}
@@ -239,6 +274,85 @@ const AiVariantGeneratorScreen: React.FC<AiVariantGeneratorScreenProps> = ({ nav
                         {isProcessing ? 'AI 분석 및 문제 추출 중...' : '문제 추출 시작'}
                     </button>
                 </div>
+
+                {/* 5. Preview of Recognized Pages */}
+                {previewImages.length > 0 && (
+                    <div className="mt-10">
+                        <h4 className="text-sm font-semibold text-slate-600 dark:text-slate-300 mb-3">
+                            인식된 페이지 미리보기 ({previewImages.length}장)
+                        </h4>
+                        <div className="grid grid-cols-2 md:grid-cols-3 gap-4 max-h-80 overflow-y-auto pr-1">
+                            {previewImages.map((src, idx) => (
+                                <div
+                                    key={idx}
+                                    className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-sm"
+                                >
+                                    <img
+                                        src={src}
+                                        alt={`업로드 페이지 ${idx + 1}`}
+                                        className="w-full h-32 object-cover rounded-t-lg"
+                                    />
+                                    <div className="px-3 py-2 text-xs text-slate-600 dark:text-slate-300">
+                                        페이지 {idx + 1}
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                )}
+
+                {/* 6. Extracted Questions */}
+                {extractedQuestions.length > 0 && (
+                    <div className="mt-10">
+                        <div className="flex items-center justify-between mb-3">
+                            <h4 className="text-sm font-semibold text-slate-600 dark:text-slate-300">
+                                추출된 문제 ({extractedQuestions.length}문제)
+                            </h4>
+                            <span className="text-xs text-slate-400">
+                                JSON 저장 및 Supabase 업로드 전에 내용을 검토하세요.
+                            </span>
+                        </div>
+                        <div className="space-y-3 max-h-80 overflow-y-auto pr-1">
+                            {extractedQuestions.map((question, idx) => (
+                                <div
+                                    key={`${question.questionText}-${idx}`}
+                                    className="p-3 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900"
+                                >
+                                    <p className="text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1">
+                                        문항 #{idx + 1} {question.subject ? `· ${question.subject}` : ''}
+                                    </p>
+                                    <p className="text-sm text-slate-800 dark:text-slate-100 whitespace-pre-line">
+                                        {question.questionText}
+                                    </p>
+                                    {question.options?.length > 0 && (
+                                        <ul className="mt-2 space-y-1 text-sm">
+                                            {question.options.map((option, optionIdx) => {
+                                                const isCorrect = optionIdx === question.answerIndex;
+                                                return (
+                                                    <li
+                                                        key={`${idx}-option-${optionIdx}`}
+                                                        className={`px-3 py-1.5 rounded-lg border text-slate-700 dark:text-slate-100 ${isCorrect
+                                                            ? 'border-green-400 bg-green-50 dark:bg-green-900/30'
+                                                            : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800'
+                                                            }`}
+                                                    >
+                                                        <span className="font-semibold mr-2">{optionIdx + 1}.</span>
+                                                        <span>{option}</span>
+                                                        {isCorrect && (
+                                                            <span className="ml-2 text-xs font-semibold text-green-600 dark:text-green-300">
+                                                                (정답)
+                                                            </span>
+                                                        )}
+                                                    </li>
+                                                );
+                                            })}
+                                        </ul>
+                                    )}
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                )}
 
             </div>
         </div>

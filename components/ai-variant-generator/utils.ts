@@ -7,8 +7,14 @@ export interface SubjectProcessingPackage {
     questions: QuestionModel[];
     questionPageMap: [number, number][];
     questionDiagramMap: [number, { pageIndex: number, bounds: { x: number, y: number, width: number, height: number } }][];
-    previewImages: any[];
+    previewImages: Array<{
+        pageIndex: number;
+        imageUrl: string | null;
+        dataUrl: string | null;
+    }>;
 }
+
+export type PagePreview = SubjectProcessingPackage['previewImages'][number];
 
 export const slugifyForStorage = (value: string): string => {
     return value
