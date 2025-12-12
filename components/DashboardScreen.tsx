@@ -101,6 +101,37 @@ const DashboardScreen: React.FC<DashboardScreenProps> = ({ navigate, startMockTe
 
     return (
         <div className="space-y-8">
+            {/* 메인 메뉴 버튼 */}
+            <div className="space-y-4">
+                <div className="flex flex-col md:flex-row gap-4">
+                    <button
+                        onClick={() => navigate('subject-select')}
+                        className="w-full md:flex-1 bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-4 rounded-lg transition-transform transform hover:scale-105"
+                    >
+                        학습하기
+                    </button>
+                    <button
+                        onClick={startMockTest}
+                        disabled={!canStartPhase2}
+                        className={`w-full md:flex-1 font-bold py-3 px-4 rounded-lg transition-transform transform hover:scale-105 ${canStartPhase2 ? 'bg-blue-600 hover:bg-blue-700 text-white' : 'bg-slate-400 text-white cursor-not-allowed'}`}
+                    >
+                        CBT 모의고사 시작
+                    </button>
+                    <button
+                        onClick={() => navigate('wrong-note')}
+                        className="w-full md:flex-1 bg-red-600 hover:bg-red-700 text-white font-bold py-3 px-4 rounded-lg transition-transform transform hover:scale-105 disabled:bg-slate-500 disabled:cursor-not-allowed"
+                        disabled={progress.totalWrongAnswers === 0}
+                    >
+                        오답 노트 학습 ({progress.totalWrongAnswers})
+                    </button>
+                </div>
+                {!canStartPhase2 && (
+                    <p className="text-xs text-slate-500 dark:text-slate-400">
+                        각 과목에서 정답률 70% 이상을 3회 연속 달성하면 CBT 모의고사가 활성화됩니다.
+                    </p>
+                )}
+            </div>
+
             <div>
                 <h2 className="text-2xl font-bold text-slate-800 dark:text-slate-200 mb-6">학습 진행율 ({certification})</h2>
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
@@ -281,36 +312,6 @@ const DashboardScreen: React.FC<DashboardScreenProps> = ({ navigate, startMockTe
                     <h4 className="text-sm font-semibold text-slate-800 dark:text-slate-200 mb-2">동기 부여 메시지</h4>
                     <p className="text-sm text-slate-600 dark:text-slate-300">{motivationalMessage}</p>
                 </div>
-            </div>
-
-            <div className="space-y-4 pt-4">
-                <div className="flex flex-col md:flex-row gap-4">
-                    <button
-                        onClick={() => navigate('subject-select')}
-                        className="w-full md:flex-1 bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-4 rounded-lg transition-transform transform hover:scale-105"
-                    >
-                        학습하기
-                    </button>
-                    <button
-                        onClick={startMockTest}
-                        disabled={!canStartPhase2}
-                        className={`w-full md:flex-1 font-bold py-3 px-4 rounded-lg transition-transform transform hover:scale-105 ${canStartPhase2 ? 'bg-blue-600 hover:bg-blue-700 text-white' : 'bg-slate-400 text-white cursor-not-allowed'}`}
-                    >
-                        CBT 모의고사 시작
-                    </button>
-                    <button
-                        onClick={() => navigate('wrong-note')}
-                        className="w-full md:flex-1 bg-red-600 hover:bg-red-700 text-white font-bold py-3 px-4 rounded-lg transition-transform transform hover:scale-105 disabled:bg-slate-500 disabled:cursor-not-allowed"
-                        disabled={progress.totalWrongAnswers === 0}
-                    >
-                        오답 노트 학습 ({progress.totalWrongAnswers})
-                    </button>
-                </div>
-                {!canStartPhase2 && (
-                    <p className="text-xs text-slate-500 dark:text-slate-400">
-                        각 과목에서 정답률 70% 이상을 3회 연속 달성하면 CBT 모의고사가 활성화됩니다.
-                    </p>
-                )}
             </div>
         </div>
     );

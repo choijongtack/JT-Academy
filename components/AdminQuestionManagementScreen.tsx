@@ -52,6 +52,9 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
     const [deleteConfirmId, setDeleteConfirmId] = useState<number | null>(null);
     const [deleteWithStorage, setDeleteWithStorage] = useState(true);
 
+    // Question detail modal
+    const [selectedQuestion, setSelectedQuestion] = useState<ManagedQuestion | null>(null);
+
     // Check admin permission
     useEffect(() => {
         if (!isAdmin(session)) {
@@ -475,22 +478,37 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
                                         )}
                                     </td>
                                     <td className="px-4 py-3 text-sm text-slate-900 dark:text-slate-100">
-                                        {editingId === question.id ? (
-                                            <input
-                                                type="text"
-                                                value={editForm.topicCategory || ''}
-                                                onChange={(e) => setEditForm({ ...editForm, topicCategory: e.target.value })}
-                                                className="w-full px-2 py-1 border rounded bg-white dark:bg-slate-700"
-                                                placeholder="주제 입력"
-                                            />
-                                        ) : (
+                                        {editingId === question.id ? (() => {
+                                            // Get available topics based on certification and subject
+                                            const currentSubject = editForm.subject || question.normalizedSubject;
+                                            const availableTopicsForEdit = SUBJECT_TOPICS[currentSubject] || [];
+
+                                            return (
+                                                <select
+                                                    value={editForm.topicCategory || ''}
+                                                    onChange={(e) => setEditForm({ ...editForm, topicCategory: e.target.value })}
+                                                    className="w-full px-2 py-1 border rounded bg-white dark:bg-slate-700"
+                                                >
+                                                    <option value="">주제 선택</option>
+                                                    {availableTopicsForEdit.map(topic => (
+                                                        <option key={topic} value={topic}>{topic}</option>
+                                                    ))}
+                                                </select>
+                                            );
+                                        })() : (
                                             question.normalizedTopic === '기타' && question.topicCategory
                                                 ? `기타 (${question.topicCategory})`
                                                 : question.normalizedTopic
                                         )}
                                     </td>
-                                    <td className="px-4 py-3 text-sm text-slate-900 dark:text-slate-100 max-w-xs truncate">
-                                        {question.questionText.substring(0, 50)}...
+                                    <td className="px-4 py-3 text-sm text-slate-900 dark:text-slate-100 max-w-xs">
+                                        <button
+                                            onClick={() => setSelectedQuestion(question)}
+                                            className="text-left hover:text-blue-600 dark:hover:text-blue-400 underline decoration-dotted truncate block w-full"
+                                            title="클릭하여 전체 내용 보기"
+                                        >
+                                            {question.questionText.substring(0, 50)}...
+                                        </button>
                                     </td>
                                     <td className="px-4 py-3 text-sm">
                                         {editingId === question.id ? (
@@ -632,6 +650,104 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
                     </div>
                 )}
             </div>
+
+            {/* Question Detail Modal */}
+            {selectedQuestion && (
+                <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+                    <div className="bg-white dark:bg-slate-800 rounded-lg shadow-xl max-w-3xl w-full max-h-[90vh] overflow-y-auto">
+                        <div className="p-6">
+                            <div className="flex justify-between items-start mb-4">
+                                <h3 className="text-xl font-bold text-slate-800 dark:text-slate-200">
+                                    문제 상세 정보
+                                </h3>
+                                <button
+                                    onClick={() => setSelectedQuestion(null)}
+                                    className="text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200"
+                                >
+                                    <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                                    </svg>
+                                </button>
+                            </div>
+
+                            <div className="space-y-4">
+                                {/* Metadata */}
+                                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 p-4 bg-slate-100 dark:bg-slate-700 rounded-lg">
+                                    <div>
+                                        <p className="text-xs text-slate-600 dark:text-slate-400">ID</p>
+                                        <p className="font-semibold text-slate-900 dark:text-slate-100">{selectedQuestion.id}</p>
+                                    </div>
+                                    <div>
+                                        <p className="text-xs text-slate-600 dark:text-slate-400">자격증</p>
+                                        <p className="font-semibold text-slate-900 dark:text-slate-100">{selectedQuestion.certification}</p>
+                                    </div>
+                                    <div>
+                                        <p className="text-xs text-slate-600 dark:text-slate-400">과목</p>
+                                        <p className="font-semibold text-slate-900 dark:text-slate-100">{selectedQuestion.normalizedSubject}</p>
+                                    </div>
+                                    <div>
+                                        <p className="text-xs text-slate-600 dark:text-slate-400">연도</p>
+                                        <p className="font-semibold text-slate-900 dark:text-slate-100">{selectedQuestion.year}</p>
+                                    </div>
+                                </div>
+
+                                {/* Question Text */}
+                                <div>
+                                    <h4 className="font-semibold text-slate-700 dark:text-slate-300 mb-2">문제</h4>
+                                    <p className="text-slate-900 dark:text-slate-100 whitespace-pre-wrap">
+                                        {selectedQuestion.questionText}
+                                    </p>
+                                </div>
+
+                                {/* Options */}
+                                {selectedQuestion.options && selectedQuestion.options.length > 0 && (
+                                    <div>
+                                        <h4 className="font-semibold text-slate-700 dark:text-slate-300 mb-2">선택지</h4>
+                                        <div className="space-y-2">
+                                            {selectedQuestion.options.map((option, idx) => (
+                                                <div
+                                                    key={idx}
+                                                    className={`p-3 rounded-lg border ${idx === selectedQuestion.answerIndex
+                                                        ? 'border-green-500 bg-green-50 dark:bg-green-900/30'
+                                                        : 'border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-700'
+                                                        }`}
+                                                >
+                                                    <span className="font-semibold mr-2">{idx + 1}.</span>
+                                                    <span>{option}</span>
+                                                    {idx === selectedQuestion.answerIndex && (
+                                                        <span className="ml-2 text-xs font-semibold text-green-600 dark:text-green-300">
+                                                            (정답)
+                                                        </span>
+                                                    )}
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
+
+                                {/* Explanation */}
+                                {selectedQuestion.explanation && (
+                                    <div>
+                                        <h4 className="font-semibold text-slate-700 dark:text-slate-300 mb-2">해설</h4>
+                                        <p className="text-slate-900 dark:text-slate-100 whitespace-pre-wrap bg-slate-50 dark:bg-slate-700 p-4 rounded-lg">
+                                            {selectedQuestion.explanation}
+                                        </p>
+                                    </div>
+                                )}
+                            </div>
+
+                            <div className="mt-6 flex justify-end">
+                                <button
+                                    onClick={() => setSelectedQuestion(null)}
+                                    className="px-4 py-2 bg-slate-600 hover:bg-slate-700 text-white rounded-lg"
+                                >
+                                    닫기
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 };

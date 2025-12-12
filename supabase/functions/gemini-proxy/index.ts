@@ -29,7 +29,7 @@ serve(async (req) => {
       case 'generateContent': {
         // Generic content generation
         const { model, prompt, schema, imageParts } = payload;
-        const modelName = model || "gemini-2.0-flash-exp";
+        const modelName = model || "gemini-2.5-flash";
         const generationConfig: any = {};
 
         if (schema) {
@@ -58,7 +58,7 @@ serve(async (req) => {
 
       case 'generateExplanation': {
         const { prompt } = payload;
-        const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash-exp" });
+        const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
         const response = await model.generateContent(prompt);
         result = response.response.text();
         break;
@@ -72,7 +72,7 @@ serve(async (req) => {
         };
 
         const model = genAI.getGenerativeModel({
-          model: "gemini-2.0-flash-exp",
+          model: "gemini-2.5-flash",
           generationConfig
         });
 
@@ -91,7 +91,7 @@ serve(async (req) => {
         };
 
         const model = genAI.getGenerativeModel({
-          model: "gemini-2.0-flash-exp",
+          model: "gemini-2.5-flash",
           generationConfig
         });
 

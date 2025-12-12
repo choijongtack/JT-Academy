@@ -18,6 +18,7 @@ interface DiagramReviewModalProps {
     questions: QuestionModel[];
     diagramAssignments: SubjectProcessingPackage['questionDiagramMap'];
     pagePreviews: PagePreview[];
+    selectedSubject?: string | null;
     onClose: () => void;
     onApply: (updatedAssignments: SubjectProcessingPackage['questionDiagramMap']) => void;
 }
@@ -91,6 +92,7 @@ const DiagramReviewModal: React.FC<DiagramReviewModalProps> = ({
     questions,
     diagramAssignments,
     pagePreviews,
+    selectedSubject,
     onClose,
     onApply
 }) => {
@@ -246,6 +248,32 @@ const DiagramReviewModal: React.FC<DiagramReviewModalProps> = ({
             </div>
         );
     }
+
+    useEffect(() => {
+        if (!activeItem) return;
+        const pageIndex = activeItem.info.pageIndex;
+        const naturalSize = naturalSizes.get(pageIndex);
+        if (!naturalSize) return;
+        setBoundsByQuestion(prev => {
+            const current = prev.get(activeItem.questionIndex);
+            const widthValid = current && Number.isFinite(current.width) && current.width > MIN_CROP_SIZE;
+            const heightValid = current && Number.isFinite(current.height) && current.height > MIN_CROP_SIZE;
+            if (widthValid && heightValid) {
+                return prev;
+            }
+            const defaultWidth = Math.max(MIN_CROP_SIZE, Math.round(naturalSize.width * 0.35));
+            const defaultHeight = Math.max(MIN_CROP_SIZE, Math.round(naturalSize.height * 0.35));
+            const centeredBounds: DiagramBounds = {
+                x: Math.max(0, Math.round((naturalSize.width - defaultWidth) / 2)),
+                y: Math.max(0, Math.round((naturalSize.height - defaultHeight) / 2)),
+                width: defaultWidth,
+                height: defaultHeight
+            };
+            const next = new Map(prev);
+            next.set(activeItem.questionIndex, centeredBounds);
+            return next;
+        });
+    }, [activeItem, naturalSizes]);
 
     const activeNaturalSize = naturalSizes.get(activeItem.info.pageIndex);
     const naturalWidth = activeNaturalSize?.width ?? 1;

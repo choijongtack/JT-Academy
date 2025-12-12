@@ -150,9 +150,17 @@ const AiVariantGeneratorScreen: React.FC<AiVariantGeneratorScreenProps> = ({ nav
                     yearError={yearError}
                     shouldShowYearError={shouldShowYearError}
                     handleSaveCurrentSubject={handleSaveCurrentSubject}
-                    onNext={() => setIsPaused(false)}
+                    onNext={() => {
+                        setIsPaused(false);
+                        if (!selectedSubject) {
+                            handleResetSubjectRanges();
+                        }
+                    }}
                     onCancel={() => {
                         setIsPaused(false);
+                        if (!selectedSubject) {
+                            handleResetSubjectRanges();
+                        }
                         // Trigger cancel logic via hook if exposed, or just reset
                     }}
                 />
@@ -171,6 +179,7 @@ const AiVariantGeneratorScreen: React.FC<AiVariantGeneratorScreenProps> = ({ nav
                     questions={pendingSubjectPackage.questions}
                     diagramAssignments={pendingSubjectPackage.questionDiagramMap}
                     pagePreviews={pendingSubjectPackage.previewImages}
+                    selectedSubject={selectedSubject}
                     onClose={closeDiagramReview}
                     onApply={applyDiagramReview}
                 />

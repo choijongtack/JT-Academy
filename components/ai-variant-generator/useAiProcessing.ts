@@ -25,7 +25,8 @@ import {
 import {
     analyzeQuestionsFromText,
     analyzeQuestionsFromImages,
-    extractTextFromImages
+    extractTextFromImages,
+    batchClassifyTopics
 } from '../../services/geminiService';
 import {
     slugifyForStorage,
@@ -148,6 +149,7 @@ export const useAiProcessing = ({
     const [isProcessing, setIsProcessing] = useState(false);
     const [isSaveCompleted, setIsSaveCompleted] = useState(false);
     const [statusMessage, setStatusMessage] = useState('');
+    const statusMessageRef = useRef('');
     const [extractedQuestions, setExtractedQuestions] = useState<QuestionModel[]>([]);
     const [generatedVariants, setGeneratedVariants] = useState<QuestionModel[]>([]); // Kept for JSON load compatibility
     const [error, setError] = useState<string | null>(null);
@@ -189,6 +191,10 @@ export const useAiProcessing = ({
     useEffect(() => {
         isPausedRef.current = isPaused;
     }, [isPaused]);
+
+    useEffect(() => {
+        statusMessageRef.current = statusMessage;
+    }, [statusMessage]);
 
     useEffect(() => {
         setSubjectRanges(createDefaultSubjectRanges(certification));
@@ -496,6 +502,21 @@ export const useAiProcessing = ({
             const pageMap = new Map<number, number>();
             const diagramMap = new Map<number, { pageIndex: number, bounds: { x: number, y: number, width: number, height: number } }>();
             const totalPages = useTextMode ? totalPdfPages : allImages.length;
+            const normalizedSelectedSubject = selectedSubject?.trim() || null;
+            const shouldUseSubjectRanges = !normalizedSelectedSubject;
+            const filteredRanges = shouldUseSubjectRanges
+                ? subjectRanges
+                : [{
+                    ...createSubjectRange({
+                        name: normalizedSelectedSubject || selectedSubject || '선택 과목',
+                        startPage: 1,
+                        endPage: Math.max(1, totalPages),
+                        questionStart: 1,
+                        questionEnd: Math.max(1, totalPages)
+                    }),
+                    id: 'selected-subject-range'
+                }];
+            const processingRanges = filteredRanges;
 
             const buildSubjectPackage = (subjectName: string, startIndex: number, questionsSubset: QuestionModel[], previewMetadata: PagePreview[]) => {
                 const questionCount = questionsSubset.length;
@@ -556,13 +577,22 @@ export const useAiProcessing = ({
                 return segments;
             };
 
-            const shouldUseSubjectRanges = !selectedSubject;
+            if (!shouldUseSubjectRanges) {
+                const fallbackRange = processingRanges[0] || createSubjectRange({
+                    name: normalizedSelectedSubject || selectedSubject || '선택 과목',
+                    startPage: 1,
+                    endPage: Math.max(1, totalPages),
+                    questionStart: 1,
+                    questionEnd: QUESTIONS_PER_SUBJECT
+                });
+                fallbackRange.startPage = 1;
+                fallbackRange.endPage = totalPages;
+                fallbackRange.questionStart = 1;
+                fallbackRange.questionEnd = QUESTIONS_PER_SUBJECT;
+                processingRanges.splice(0, processingRanges.length, fallbackRange);
+            }
 
-            for (const subjectBatch of subjectRanges) {
-                if (!shouldUseSubjectRanges) {
-                    console.log('[INFO] Skipping subject ranges because selectedSubject is active');
-                    break;
-                }
+            for (const subjectBatch of processingRanges) {
                 if (cancelProcessingRef.current) {
                     setStatusMessage('작업이 중단되었습니다.');
                     setCurrentSubject(null);
@@ -570,7 +600,7 @@ export const useAiProcessing = ({
                 }
 
                 const subjectName = subjectBatch.name.trim();
-                const currentIndex = subjectRanges.findIndex(range => range.id === subjectBatch.id);
+                const currentIndex = processingRanges.findIndex(range => range.id === subjectBatch.id);
                 const safeStartPage = Math.max(1, subjectBatch.startPage);
                 const safeEndPage = Math.max(safeStartPage, subjectBatch.endPage);
 
@@ -630,17 +660,37 @@ export const useAiProcessing = ({
 
                     if (!subjectText.trim()) continue;
 
-                    setStatusMessage(`${subjectName} 분석 중 (Gemini ${currentIndex + 1}/${subjectRanges.length})`);
+                    setStatusMessage(`${subjectName} 분석 중 (Gemini ${currentIndex + 1}/${processingRanges.length})`);
                     const textQuestions = await analyzeQuestionsFromText(subjectText);
 
+                    // Conditional filtering based on mode:
+                    // - Single subject mode: Accept all questions (count limit only)
+                    // - Multi subject mode: Filter by question number to separate subjects
                     const isQuestionInRange = (question: QuestionModel) => {
+                        // Single subject mode: accept all questions regardless of number
+                        if (selectedSubject) {
+                            return true;
+                        }
+
+                        // Multi subject mode: filter by question number range
                         const detectedNumber = extractLeadingQuestionNumber(question.questionText);
-                        if (detectedNumber !== null) return detectedNumber >= minQuestionNumber && detectedNumber <= maxQuestionNumber;
+                        if (detectedNumber !== null) {
+                            return detectedNumber >= minQuestionNumber && detectedNumber <= maxQuestionNumber;
+                        }
+
+                        // If we can't detect the number, accept it (fallback)
                         return true;
                     };
 
                     const filteredQuestions = textQuestions.filter(q => isQuestionInRange(q));
-                    const enforcedSubjectQuestions = enforceSubjectQuestionQuota(filteredQuestions, textQuestions, QUESTIONS_PER_SUBJECT, isQuestionInRange);
+
+                    // Calculate limit based on question number range
+                    // e.g., 1-20 = 20 questions, 21-40 = 20 questions, 41-80 = 40 questions
+                    const rangeBasedLimit = selectedSubject
+                        ? QUESTIONS_PER_SUBJECT  // Single subject mode: use default limit
+                        : (maxQuestionNumber - minQuestionNumber + 1);  // Multi subject mode: use range size
+
+                    const enforcedSubjectQuestions = enforceSubjectQuestionQuota(filteredQuestions, textQuestions, rangeBasedLimit, isQuestionInRange);
 
                     const startIndex = allQuestions.length;
                     allQuestions.push(...enforcedSubjectQuestions);
@@ -710,7 +760,7 @@ export const useAiProcessing = ({
                     // IMPORTANT FIX: Removed !isLastSubject check.
                     // Pausing for every subject to allow saving.
                     setIsPaused(true);
-                    const nextSubjects = subjectRanges.slice(Math.max(0, currentIndex + 1)).map(s => s.name);
+                    const nextSubjects = processingRanges.slice(Math.max(0, currentIndex + 1)).map(s => s.name);
                     setPendingSubjects(nextSubjects);
 
                     await waitForResume();
@@ -730,32 +780,146 @@ export const useAiProcessing = ({
                     const subjectRawQuestions: QuestionModel[] = [];
                     const questionMetadata = new Map<QuestionModel, { pageIndex: number; bounds?: { x: number; y: number; width: number; height: number } }>();
 
+                    // Conditional filtering based on mode:
+                    // - Single subject mode: Accept all questions (count limit only)
+                    // - Multi subject mode: Filter by question number to separate subjects
                     const isQuestionInRange = (question: QuestionModel) => {
+                        // Single subject mode: accept all questions regardless of number
+                        if (selectedSubject) {
+                            return true;
+                        }
+
+                        // Multi subject mode: filter by question number range
                         const detectedNumber = extractLeadingQuestionNumber(question.questionText);
-                        if (detectedNumber !== null) return detectedNumber >= minQuestionNumber && detectedNumber <= maxQuestionNumber;
+                        if (detectedNumber !== null) {
+                            return detectedNumber >= minQuestionNumber && detectedNumber <= maxQuestionNumber;
+                        }
+
+                        // If we can't detect the number, accept it (fallback)
                         return true;
                     };
 
+                    // Process images page-by-page for stability and debugging
+                    console.log(`[${subjectName}] Starting page-by-page processing for ${subjectPages.length} pages`);
+                    console.log(`[${subjectName}] Question range filter: ${minQuestionNumber} - ${maxQuestionNumber}`);
+
                     for (let idx = 0; idx < subjectPages.length; idx++) {
                         const pageIndex = startIdx + idx;
+                        const pageNumber = pageIndex + 1;
                         setStatusMessage(`${subjectName} 이미지 분석 중... (${idx + 1}/${subjectPages.length}페이지)`);
+
+                        console.log(`\n[${subjectName}] Processing page ${pageNumber} (${idx + 1}/${subjectPages.length})`);
+
                         let questions: QuestionModel[] = [];
                         try {
-                            questions = await analyzeQuestionsFromImages([subjectPages[idx]], selectedSubject || undefined, CERTIFICATION_SUBJECTS[certification]);
-                        } catch (err) { console.error(err); }
+                            questions = await analyzeQuestionsFromImages(
+                                [subjectPages[idx]],
+                                selectedSubject || undefined,
+                                CERTIFICATION_SUBJECTS[certification]
+                            );
+                            console.log(`[${subjectName}] Page ${pageNumber}: AI extracted ${questions.length} questions`);
+                        } catch (err) {
+                            const errorMsg = err instanceof Error ? err.message : String(err);
+                            console.error(`[${subjectName}] Page ${pageNumber}: Failed to analyze -`, err);
 
+                            // Edge Function 500 에러 감지
+                            if (errorMsg.includes('500') || errorMsg.includes('non-2xx status code')) {
+                                const edgeFunctionError = `🔴 Supabase Edge Function 오류 발생\n\n` +
+                                    `원인:\n` +
+                                    `1. Gemini API 키가 설정되지 않았거나 만료됨\n` +
+                                    `2. Edge Function 내부 오류\n` +
+                                    `3. Gemini API 서버 문제\n\n` +
+                                    `해결 방법:\n` +
+                                    `1. Supabase Dashboard → Edge Functions → gemini-proxy → Logs 확인\n` +
+                                    `2. GEMINI_API_KEY 시크릿이 올바르게 설정되었는지 확인\n` +
+                                    `3. Edge Function을 다시 배포해보세요`;
+                                setError(edgeFunctionError);
+                                setStatusMessage('❌ Edge Function 오류 - Supabase 설정을 확인해주세요');
+                            }
+                        }
+
+                        // Log extracted question numbers
+                        const extractedNumbers = questions.map(q => {
+                            const num = extractLeadingQuestionNumber(q.questionText);
+                            return num !== null ? num : 'N/A';
+                        });
+                        console.log(`[${subjectName}] Page ${pageNumber}: Question numbers detected:`, extractedNumbers);
+
+                        // Log first 100 chars of each question text for debugging
+                        questions.forEach((q, i) => {
+                            const preview = q.questionText.substring(0, 100);
+                            console.log(`[${subjectName}] Page ${pageNumber} Q${i + 1}: "${preview}..."`);
+                        });
+
+                        // Add to raw questions pool
                         questions.forEach(q => {
                             subjectRawQuestions.push(q);
-                            if (!questionMetadata.has(q)) questionMetadata.set(q, { pageIndex, bounds: q.diagramBounds ?? undefined });
+                            if (!questionMetadata.has(q)) {
+                                questionMetadata.set(q, {
+                                    pageIndex,
+                                    bounds: q.diagramBounds ?? undefined
+                                });
+                            }
                         });
+
+                        // Filter by question number range
+                        const beforeFilterCount = questions.length;
                         const filteredQuestions = questions.filter(isQuestionInRange);
+                        const afterFilterCount = filteredQuestions.length;
+
+                        console.log(`[${subjectName}] Page ${pageNumber}: Range filter: ${beforeFilterCount} -> ${afterFilterCount} questions`);
+                        if (beforeFilterCount > afterFilterCount) {
+                            const rejected = questions.filter(q => !isQuestionInRange(q));
+                            const rejectedNumbers = rejected.map(q => extractLeadingQuestionNumber(q.questionText));
+                            console.log(`[${subjectName}] Page ${pageNumber}: Rejected question numbers:`, rejectedNumbers);
+                            // Log why each was rejected
+                            rejected.forEach((q, i) => {
+                                const num = extractLeadingQuestionNumber(q.questionText);
+                                const preview = q.questionText.substring(0, 80);
+                                console.log(`[${subjectName}] Page ${pageNumber}: REJECTED Q${i + 1} (num=${num}): "${preview}..."`);
+                            });
+                        }
+
                         subjectCandidates.push(...filteredQuestions);
+                        console.log(`[${subjectName}] Page ${pageNumber}: Total candidates so far: ${subjectCandidates.length}`);
                     }
 
-                    const enforcedSubjectQuestions = enforceSubjectQuestionQuota(subjectCandidates, subjectRawQuestions, QUESTIONS_PER_SUBJECT, isQuestionInRange);
+                    console.log(`\n[${subjectName}] Page processing complete:`);
+                    console.log(`[${subjectName}] - Total raw questions: ${subjectRawQuestions.length}`);
+                    console.log(`[${subjectName}] - Total candidates (after range filter): ${subjectCandidates.length}`);
+
+                    // Calculate limit based on question number range
+                    // e.g., 1-20 = 20 questions, 21-40 = 20 questions, 41-80 = 40 questions
+                    const rangeBasedLimit = selectedSubject
+                        ? QUESTIONS_PER_SUBJECT  // Single subject mode: use default limit
+                        : (maxQuestionNumber - minQuestionNumber + 1);  // Multi subject mode: use range size
+
+                    const enforcedSubjectQuestions = enforceSubjectQuestionQuota(subjectCandidates, subjectRawQuestions, rangeBasedLimit, isQuestionInRange);
+                    console.log(`[${subjectName}] After quota enforcement: ${enforcedSubjectQuestions.length} questions (limit: ${rangeBasedLimit})`);
+
+                    const needsTopicClassification = enforcedSubjectQuestions.some(q => !q.topicCategory || q.topicCategory === '기타');
+                    let finalizedSubjectQuestions = enforcedSubjectQuestions;
+                    if (needsTopicClassification && enforcedSubjectQuestions.length > 0) {
+                        const previousStatus = statusMessageRef.current;
+                        setStatusMessage(`${subjectName} 토픽 분류 중 (${enforcedSubjectQuestions.length}문항)...`);
+                        try {
+                            const classificationResults = await batchClassifyTopics(enforcedSubjectQuestions);
+                            classificationResults.forEach((classified, idx) => {
+                                if (!classified) return;
+                                finalizedSubjectQuestions[idx].topicCategory = classified.topicCategory ?? finalizedSubjectQuestions[idx].topicCategory;
+                                finalizedSubjectQuestions[idx].topicKeywords = classified.topicKeywords?.length ? classified.topicKeywords : finalizedSubjectQuestions[idx].topicKeywords;
+                                finalizedSubjectQuestions[idx].difficultyLevel = classified.difficultyLevel ?? finalizedSubjectQuestions[idx].difficultyLevel;
+                            });
+                        } catch (classificationError) {
+                            console.error('Topic classification fallback failed', classificationError);
+                        } finally {
+                            setStatusMessage(previousStatus);
+                        }
+                    }
+
                     const subjectStartIndex = allQuestions.length;
 
-                    enforcedSubjectQuestions.forEach((question, idx) => {
+                    finalizedSubjectQuestions.forEach((question, idx) => {
                         const globalIdx = subjectStartIndex + idx;
                         allQuestions.push(question);
                         const meta = questionMetadata.get(question);
@@ -764,15 +928,21 @@ export const useAiProcessing = ({
                         if (meta?.bounds) diagramMap.set(globalIdx, { pageIndex, bounds: meta.bounds });
                     });
 
+                    console.log(`\n[${subjectName}] FINAL SUMMARY:`);
+                    console.log(`[${subjectName}] - Questions extracted from pages: ${subjectRawQuestions.length}`);
+                    console.log(`[${subjectName}] - Questions after range filter: ${subjectCandidates.length}`);
+                    console.log(`[${subjectName}] - Questions after quota enforcement: ${enforcedSubjectQuestions.length}`);
+                    console.log(`[${subjectName}] - Final questions to save: ${finalizedSubjectQuestions.length}\n`);
+
                     const subjectPreviewMetadata = createPreviewImageMetadata(startIdx, subjectPages, pageImageUrlCacheRef.current);
                     const subjectData = {
                         subject: subjectName,
-                        extractedQuestions: enforcedSubjectQuestions,
+                        extractedQuestions: finalizedSubjectQuestions,
                         savedAt: new Date().toISOString()
                     };
 
-                    if (enforcedSubjectQuestions.length > 0) {
-                        const subjectPackage = buildSubjectPackage(subjectName, subjectStartIndex, enforcedSubjectQuestions, subjectPreviewMetadata);
+                    if (finalizedSubjectQuestions.length > 0) {
+                        const subjectPackage = buildSubjectPackage(subjectName, subjectStartIndex, finalizedSubjectQuestions, subjectPreviewMetadata);
                         setPendingSubjectPackage(subjectPackage);
                         setIsBatchConfirmed(false);
                         const hasDiagrams = subjectPackage.questionDiagramMap.length > 0;
@@ -784,7 +954,7 @@ export const useAiProcessing = ({
                         setIsDiagramReviewComplete(true);
                     }
 
-                    setExtractedQuestions(enforcedSubjectQuestions);
+                    setExtractedQuestions(finalizedSubjectQuestions);
                     blobDownload(subjectData, subjectName);
                     setCompletedSubjects(prev => [...prev, subjectName]);
                     setStatusMessage(`${subjectName} 완료!`);
@@ -815,7 +985,12 @@ export const useAiProcessing = ({
                 setQuestionPageMap(pageMap);
                 setQuestionDiagramMap(diagramMap);
                 setExtractedQuestions(allQuestions);
-                setStatusMessage(`전체 처리 완료! ${allQuestions.length}문제를 추출했습니다`);
+
+                if (allQuestions.length === 0) {
+                    setStatusMessage('⚠️ 처리 완료했지만 0개 문제를 추출했습니다. 위 에러 메시지를 확인하세요.');
+                } else {
+                    setStatusMessage(`전체 처리 완료! ${allQuestions.length}문제를 추출했습니다`);
+                }
             }
 
         } catch (err: any) {
@@ -962,6 +1137,9 @@ export const useAiProcessing = ({
             setPendingSubjectPackage(null);
             setIsDiagramReviewComplete(false);
             setIsDiagramReviewOpen(false);
+            if (!selectedSubject) {
+                setSubjectRanges(createDefaultSubjectRanges(certification));
+            }
         } catch (error: any) {
             console.error(error);
             setError(`저장 실패: ${error.message}`);

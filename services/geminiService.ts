@@ -1,7 +1,7 @@
 /// <reference types="vite/client" />
 
 import { QuestionModel, AnalyzedQuestionResponse, GeneratedVariantProblem } from "../types";
-import { SUBJECT_TOPICS, CERTIFICATION_SUBJECTS } from "../constants";
+import { SUBJECT_TOPICS, CERTIFICATION_SUBJECTS, TOPIC_KEYWORD_OVERRIDES } from "../constants";
 import { supabase } from "./supabaseClient";
 import { Type } from "@google/genai";
 
@@ -44,6 +44,87 @@ const normalizeTopicForSubject = (subject?: string, proposedTopic?: string): str
     }
 
     return '기타';
+};
+
+const normalizeForComparison = (value: string) => value.replace(/\s+/g, '').toLowerCase();
+
+const getOverrideCandidates = (question: QuestionModel) => {
+    const normalizedSubject = question.subject ? normalizeForComparison(question.subject) : null;
+    const candidates: Record<string, string[]>[] = [];
+
+    const matchSubject = (subjectMap?: Record<string, Record<string, string[]>> | undefined) => {
+        if (!subjectMap || !normalizedSubject) return null;
+        const entry = Object.entries(subjectMap).find(([subjectName]) => normalizeForComparison(subjectName) === normalizedSubject);
+        return entry ? entry[1] : null;
+    };
+
+    const pushAllSubjects = (subjectMap?: Record<string, Record<string, string[]>> | undefined) => {
+        if (!subjectMap) return;
+        Object.values(subjectMap).forEach(map => candidates.push(map));
+    };
+
+    let hasSubjectMatch = false;
+
+    if (question.certification) {
+        const certMap = TOPIC_KEYWORD_OVERRIDES[question.certification as keyof typeof TOPIC_KEYWORD_OVERRIDES];
+        const matched = matchSubject(certMap);
+        if (matched) {
+            candidates.push(matched);
+            hasSubjectMatch = true;
+        } else {
+            pushAllSubjects(certMap);
+        }
+    }
+
+    if (!hasSubjectMatch) {
+        const allCertMaps = Object.values(TOPIC_KEYWORD_OVERRIDES);
+        if (normalizedSubject) {
+            allCertMaps.forEach(certMap => {
+                const matched = matchSubject(certMap);
+                if (matched) {
+                    candidates.push(matched);
+                    hasSubjectMatch = true;
+                }
+            });
+        }
+        if (!hasSubjectMatch) {
+            allCertMaps.forEach(certMap => pushAllSubjects(certMap));
+        }
+    }
+
+    return candidates;
+};
+
+const detectTopicOverride = (question: QuestionModel): string | null => {
+    if (!question) return null;
+    const textParts: string[] = [];
+    if (question.questionText) textParts.push(question.questionText);
+    if (Array.isArray(question.options)) textParts.push(...question.options.filter(Boolean));
+    if (question.aiExplanation) textParts.push(question.aiExplanation);
+    if (question.hint) textParts.push(question.hint);
+    if (question.rationale) textParts.push(question.rationale);
+
+    const normalizedHaystack = normalizeForComparison(textParts.join(' '));
+    if (!normalizedHaystack) return null;
+
+    const candidateMaps = getOverrideCandidates(question);
+    for (const topicMap of candidateMaps) {
+        for (const [topic, keywords] of Object.entries(topicMap)) {
+            for (const keyword of keywords) {
+                const normalizedKeyword = normalizeForComparison(keyword);
+                if (normalizedKeyword && normalizedHaystack.includes(normalizedKeyword)) {
+                    return topic;
+                }
+            }
+        }
+    }
+    return null;
+};
+
+const resolveTopicCategory = (question: QuestionModel, candidateTopic?: string | null): string => {
+    const override = detectTopicOverride(question);
+    const topicToNormalize = override || candidateTopic || undefined;
+    return normalizeTopicForSubject(question.subject, topicToNormalize);
 };
 
 export const generateAIExplanation = async (question: QuestionModel): Promise<string> => {
@@ -417,7 +498,7 @@ export const analyzeQuestionsFromImages = async (images: string[], subjectHint?:
                 processedQ.subject = normalizedSubject;
             }
 
-            processedQ.topicCategory = normalizeTopicForSubject(processedQ.subject, processedQ.topicCategory);
+            processedQ.topicCategory = resolveTopicCategory(processedQ, processedQ.topicCategory);
 
             // 2. STRICT Diagram Filtering
             const diagramKeywords = ["그림", "다음 그림", "아래 그림", "회로도", "결선도"];
@@ -551,8 +632,18 @@ export async function classifyQuestionTopic(
     topicKeywords: string[];
     difficultyLevel: 'easy' | 'medium' | 'hard';
 }> {
+    const overrideTopic = detectTopicOverride(question);
+    if (overrideTopic) {
+        const normalized = resolveTopicCategory(question, overrideTopic);
+        return {
+            topicCategory: normalized,
+            topicKeywords: [overrideTopic],
+            difficultyLevel: question.difficultyLevel || 'medium'
+        };
+    }
+
     const prompt = `
-다음 전기기사 실기 시험 문제를 분석하여 주제를 분류해주세요.
+다음 전기기사 필기 시험 문제를 분석하여 주제를 분류해주세요.
 
 과목: ${question.subject}
 문제: ${question.questionText}
@@ -580,7 +671,7 @@ export async function classifyQuestionTopic(
             body: {
                 action: 'generateContent',
                 payload: {
-                    model: 'gemini-2.0-flash-exp',
+                    model: 'gemini-2.5-flash',
                     prompt,
                     schema: {
                         type: "OBJECT",
@@ -605,7 +696,7 @@ export async function classifyQuestionTopic(
         const cleanText = text.replace(/```json/g, '').replace(/```/g, '').trim();
         const parsed = JSON.parse(cleanText);
 
-        const normalizedTopic = normalizeTopicForSubject(question.subject, parsed.topicCategory);
+        const normalizedTopic = resolveTopicCategory(question, parsed.topicCategory);
         return {
             topicCategory: normalizedTopic,
             topicKeywords: Array.isArray(parsed.topicKeywords) ? parsed.topicKeywords : [],
@@ -614,39 +705,70 @@ export async function classifyQuestionTopic(
     } catch (error) {
         console.error('Topic classification error:', error);
         return {
-            topicCategory: normalizeTopicForSubject(question.subject, undefined),
+            topicCategory: resolveTopicCategory(question),
             topicKeywords: [],
             difficultyLevel: 'medium'
         };
     }
 }
 
+const TOPIC_CLASSIFICATION_TIMEOUT_MS = 15000;
+const TOPIC_CLASSIFICATION_CONCURRENCY = 3;
+
+type TopicClassificationResult = Awaited<ReturnType<typeof classifyQuestionTopic>>;
+
+const classifyQuestionTopicWithTimeout = (
+    question: QuestionModel,
+    timeoutMs: number = TOPIC_CLASSIFICATION_TIMEOUT_MS
+): Promise<TopicClassificationResult> => {
+    return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+            reject(new Error('Topic classification timeout'));
+        }, timeoutMs);
+
+        classifyQuestionTopic(question)
+            .then(result => {
+                clearTimeout(timer);
+                resolve(result);
+            })
+            .catch(error => {
+                clearTimeout(timer);
+                reject(error);
+            });
+    });
+};
+
 export async function batchClassifyTopics(
     questions: QuestionModel[]
 ): Promise<QuestionModel[]> {
     const classified: QuestionModel[] = [];
+    const chunkSize = Math.max(1, TOPIC_CLASSIFICATION_CONCURRENCY);
 
     console.log(`Starting topic classification for ${questions.length} questions...`);
 
-    for (let i = 0; i < questions.length; i++) {
-        const question = questions[i];
-        console.log(`Classifying question ${i + 1}/${questions.length}...`);
+    for (let i = 0; i < questions.length; i += chunkSize) {
+        const chunk = questions.slice(i, i + chunkSize);
+        const results = await Promise.allSettled(
+            chunk.map(question => classifyQuestionTopicWithTimeout(question))
+        );
 
-        try {
-            const classification = await classifyQuestionTopic(question);
-            classified.push({
-                ...question,
-                ...classification,
-            });
-        } catch (error) {
-            console.error(`Failed to classify question ${question.id}:`, error);
-            classified.push({
-                ...question,
-                topicCategory: '기타',
-                topicKeywords: [],
-                difficultyLevel: 'medium'
-            });
-        }
+        results.forEach((result, index) => {
+            const question = chunk[index];
+            if (result.status === 'fulfilled') {
+                classified.push({
+                    ...question,
+                    ...result.value,
+                });
+            } else {
+                console.error(`Failed to classify question ${question.id}:`, result.reason);
+                classified.push({
+                    ...question,
+                    topicCategory: resolveTopicCategory(question),
+                    topicKeywords: question.topicKeywords ?? [],
+                    difficultyLevel: question.difficultyLevel ?? 'medium'
+                });
+            }
+        });
     }
 
     console.log(`Topic classification complete! ${classified.length} questions classified.`);

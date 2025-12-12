@@ -137,7 +137,7 @@ export const chunkStandardPages = (pages: StandardPageEntry[]): Array<{
     }));
 };
 
-export const QUESTIONS_PER_SUBJECT = 20;
+export const QUESTIONS_PER_SUBJECT = 40;
 
 export const enforceSubjectQuestionQuota = (
     primary: QuestionModel[],
