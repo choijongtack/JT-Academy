@@ -22,6 +22,8 @@ const isMissingStandardTableError = (error: any): boolean => {
   );
 };
 
+const PHASE1_HISTORY_TABLE = 'phase1_question_history';
+
 const mapCertificationStandard = (item: any): CertificationStandard => {
   const files = (item.certification_standard_files || [])
     .sort((a: any, b: any) => (a.sort_index ?? 0) - (b.sort_index ?? 0))
@@ -119,15 +121,31 @@ export const quizApi = {
     }));
   },
 
-  getQuestionsForPhase1: async ({ subject, certification }: { subject: string; certification?: string }): Promise<QuestionModel[]> => {
+  getQuestionsForPhase1: async ({ subject, certification, excludeQuestionIds = [] }: { subject: string; certification?: string; excludeQuestionIds?: number[] }): Promise<QuestionModel[]> => {
     const allQuestions = await quizApi.loadQuestions({ subject, certification });
     const limit = 20;
     if (allQuestions.length <= limit) {
       return allQuestions;
     }
 
+    const excludedSet = new Set(excludeQuestionIds);
+    const primaryQuestions = allQuestions.filter(q => !excludedSet.has(q.id));
+    const fallbackQuestions = excludedSet.size > 0 ? allQuestions.filter(q => excludedSet.has(q.id)) : [];
+    const workingQuestions = primaryQuestions.length > 0 ? primaryQuestions : allQuestions;
+
+    if (workingQuestions.length <= limit) {
+      const combined = [...workingQuestions];
+      if (combined.length < limit && fallbackQuestions.length > 0) {
+        const fallbackToUse = fallbackQuestions
+          .filter(q => !combined.some(selected => selected.id === q.id))
+          .sort((a, b) => ((b.frequency ?? 0) - (a.frequency ?? 0)) || Math.random() - 0.5);
+        combined.push(...fallbackToUse.slice(0, limit - combined.length));
+      }
+      return combined.slice(0, limit).sort(() => 0.5 - Math.random());
+    }
+
     const grouped = new Map<string, QuestionModel[]>();
-    allQuestions.forEach(question => {
+    workingQuestions.forEach(question => {
       const key = question.topicCategory || '기타';
       if (!grouped.has(key)) {
         grouped.set(key, []);
@@ -184,9 +202,65 @@ export const quizApi = {
       }
     }
 
+    if (selected.length < limit && fallbackQuestions.length > 0) {
+      const fallbackRemainder = fallbackQuestions
+        .filter(question => !selected.some(selectedQuestion => selectedQuestion.id === question.id))
+        .sort((a, b) => ((b.frequency ?? 0) - (a.frequency ?? 0)) || Math.random() - 0.5);
+      for (const question of fallbackRemainder) {
+        if (selected.length >= limit) break;
+        selected.push(question);
+      }
+    }
+
     return selected
       .slice(0, limit)
       .sort(() => 0.5 - Math.random());
+  },
+
+  getPhase1History: async (userId: string, certification: string, subject: string, limit = 5): Promise<number[][]> => {
+    const { data, error } = await supabase
+      .from(PHASE1_HISTORY_TABLE)
+      .select('question_ids')
+      .eq('user_id', userId)
+      .eq('certification', certification)
+      .eq('subject', subject)
+      .order('created_at', { ascending: false })
+      .limit(limit);
+
+    if (error) {
+      console.error('Error fetching Phase 1 history:', error);
+      return [];
+    }
+
+    if (!data) return [];
+
+    return data
+      .map(item => {
+        if (!Array.isArray(item.question_ids)) return [];
+        return item.question_ids
+          .map((id: any) => Number(id))
+          .filter(id => Number.isFinite(id));
+      })
+      .filter(entry => entry.length > 0);
+  },
+
+  savePhase1History: async (userId: string, certification: string, subject: string, questionIds: number[]): Promise<void> => {
+    if (questionIds.length === 0) return;
+    const payload = {
+      user_id: userId,
+      certification,
+      subject,
+      question_ids: questionIds,
+    };
+
+    const { error } = await supabase
+      .from(PHASE1_HISTORY_TABLE)
+      .insert(payload);
+
+    if (error) {
+      console.error('Error saving Phase 1 history:', error);
+      throw new Error(error.message || 'Failed to save Phase 1 history');
+    }
   },
 
   getTopicStatistics: async (subject?: string, certification?: string): Promise<import('../types').TopicStats[]> => {

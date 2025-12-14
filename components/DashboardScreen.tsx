@@ -94,6 +94,29 @@ const DashboardScreen: React.FC<DashboardScreenProps> = ({ navigate, startMockTe
         };
     });
 
+    const subjectCardThemes = [
+        {
+            container: 'bg-gradient-to-br from-indigo-50 to-indigo-100 dark:from-indigo-900/30 dark:to-indigo-800/30',
+            border: 'border-indigo-100 dark:border-indigo-800',
+            accent: 'text-indigo-800 dark:text-indigo-100'
+        },
+        {
+            container: 'bg-gradient-to-br from-sky-50 to-blue-100 dark:from-sky-900/30 dark:to-blue-900/30',
+            border: 'border-sky-100 dark:border-sky-900',
+            accent: 'text-sky-800 dark:text-sky-100'
+        },
+        {
+            container: 'bg-gradient-to-br from-amber-50 to-orange-100 dark:from-amber-900/30 dark:to-orange-900/30',
+            border: 'border-amber-100 dark:border-amber-900',
+            accent: 'text-amber-900 dark:text-amber-100'
+        },
+        {
+            container: 'bg-gradient-to-br from-emerald-50 to-teal-100 dark:from-emerald-900/30 dark:to-teal-900/30',
+            border: 'border-emerald-100 dark:border-emerald-900',
+            accent: 'text-emerald-900 dark:text-emerald-100'
+        }
+    ];
+
     const firstLockedSubject = certSubjects.find(subject => !(phaseStatuses[subject]?.ready));
     const motivationalMessage = firstLockedSubject
         ? `${firstLockedSubject} 정확도를 조금만 더 끌어올려 Phase 2로 전환해 보세요!`
@@ -136,37 +159,40 @@ const DashboardScreen: React.FC<DashboardScreenProps> = ({ navigate, startMockTe
                 <h2 className="text-2xl font-bold text-slate-800 dark:text-slate-200 mb-6">학습 진행율 ({certification})</h2>
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                     {/* 완성도 카드 */}
-                    <div className="bg-gradient-to-br from-blue-50 to-blue-100 dark:from-blue-900/20 dark:to-blue-800/20 p-6 rounded-xl shadow-lg border border-blue-200 dark:border-blue-700 hover:shadow-xl transition-shadow">
-                        <div className="flex items-center justify-between mb-4">
-                            <h3 className="text-base font-semibold text-blue-700 dark:text-blue-300 uppercase tracking-wide">완성도</h3>
+                    <div className="bg-gradient-to-br from-blue-50 to-blue-100 dark:from-blue-900/20 dark:to-blue-800/20 p-6 rounded-2xl shadow-lg border border-blue-200 dark:border-blue-700 hover:shadow-xl transition-shadow">
+                        <div className="flex items-center justify-between bg-white/60 dark:bg-blue-900/40 px-4 py-2 rounded-xl shadow-sm border border-blue-100/70 dark:border-blue-800/60">
+                            <h3 className="text-lg md:text-xl font-bold text-blue-700 dark:text-blue-200">완성도</h3>
                             <svg className="w-6 h-6 text-blue-500 dark:text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
                             </svg>
                         </div>
+                        <div className="mt-3 mb-5 h-px w-full bg-blue-200/70 dark:bg-blue-700/60"></div>
                         <p className="text-5xl font-bold text-blue-600 dark:text-blue-400 mb-2">{completionRate.toFixed(1)}%</p>
                         <p className="text-sm text-blue-600/70 dark:text-blue-300/70">{solvedQuestions} / {totalQuestions} 문제</p>
                     </div>
 
                     {/* 정확도 카드 */}
-                    <div className="bg-gradient-to-br from-green-50 to-green-100 dark:from-green-900/20 dark:to-green-800/20 p-6 rounded-xl shadow-lg border border-green-200 dark:border-green-700 hover:shadow-xl transition-shadow">
-                        <div className="flex items-center justify-between mb-4">
-                            <h3 className="text-base font-semibold text-green-700 dark:text-green-300 uppercase tracking-wide">정확도</h3>
+                    <div className="bg-gradient-to-br from-green-50 to-green-100 dark:from-green-900/20 dark:to-green-800/20 p-6 rounded-2xl shadow-lg border border-green-200 dark:border-green-700 hover:shadow-xl transition-shadow">
+                        <div className="flex items-center justify-between bg-white/60 dark:bg-green-900/40 px-4 py-2 rounded-xl shadow-sm border border-green-100/70 dark:border-green-800/60">
+                            <h3 className="text-lg md:text-xl font-bold text-green-700 dark:text-green-200">정확도</h3>
                             <svg className="w-6 h-6 text-green-500 dark:text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
                             </svg>
                         </div>
+                        <div className="mt-3 mb-5 h-px w-full bg-green-200/70 dark:bg-green-700/60"></div>
                         <p className="text-5xl font-bold text-green-600 dark:text-green-400 mb-2">{accuracy.toFixed(1)}%</p>
                         <p className="text-sm text-green-600/70 dark:text-green-300/70">전체 정답률</p>
                     </div>
 
                     {/* 복습 항목 카드 */}
-                    <div className="bg-gradient-to-br from-red-50 to-red-100 dark:from-red-900/20 dark:to-red-800/20 p-6 rounded-xl shadow-lg border border-red-200 dark:border-red-700 hover:shadow-xl transition-shadow">
-                        <div className="flex items-center justify-between mb-4">
-                            <h3 className="text-base font-semibold text-red-700 dark:text-red-300 uppercase tracking-wide">복습 항목</h3>
+                    <div className="bg-gradient-to-br from-red-50 to-red-100 dark:from-red-900/20 dark:to-red-800/20 p-6 rounded-2xl shadow-lg border border-red-200 dark:border-red-700 hover:shadow-xl transition-shadow">
+                        <div className="flex items-center justify-between bg-white/60 dark:bg-red-900/40 px-4 py-2 rounded-xl shadow-sm border border-red-100/70 dark:border-red-800/60">
+                            <h3 className="text-lg md:text-xl font-bold text-red-700 dark:text-red-200">복습 항목</h3>
                             <svg className="w-6 h-6 text-red-500 dark:text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                             </svg>
                         </div>
+                        <div className="mt-3 mb-5 h-px w-full bg-red-200/70 dark:bg-red-700/60"></div>
                         <p className="text-5xl font-bold text-red-600 dark:text-red-400 mb-2">{progress.totalWrongAnswers}</p>
                         <p className="text-sm text-red-600/70 dark:text-red-300/70">틀린 문제 (전체)</p>
                     </div>
@@ -180,10 +206,12 @@ const DashboardScreen: React.FC<DashboardScreenProps> = ({ navigate, startMockTe
                         <span className="text-sm text-slate-500 dark:text-slate-400">{motivationalMessage}</span>
                     </div>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        {phaseInsights.map(({ subject, ready, latestAccuracy, subjectMessage }) => (
-                            <div key={subject} className="p-4 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 shadow-sm">
+                        {phaseInsights.map(({ subject, ready, latestAccuracy, subjectMessage }, index) => {
+                            const theme = subjectCardThemes[index % subjectCardThemes.length];
+                            return (
+                                <div key={subject} className={`p-4 rounded-xl border ${theme.border} ${theme.container} shadow-sm transition-shadow`}>
                                 <div className="flex items-center justify-between mb-2">
-                                    <span className="font-semibold text-slate-800 dark:text-slate-100">{subject}</span>
+                                        <span className={`font-semibold ${theme.accent}`}>{subject}</span>
                                     <span className={`text-xs font-bold px-2 py-1 rounded-full ${ready ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-200' : 'bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-200'}`}>
                                         {ready ? 'Phase 2 준비 완료' : 'Phase 1 진행 중'}
                                     </span>
@@ -193,7 +221,8 @@ const DashboardScreen: React.FC<DashboardScreenProps> = ({ navigate, startMockTe
                                 </p>
                                 <p className="text-sm text-slate-500 dark:text-slate-400">{subjectMessage}</p>
                             </div>
-                        ))}
+                            );
+                        })}
                     </div>
                 </div>
             )}

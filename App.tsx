@@ -51,6 +51,7 @@ const App: React.FC = () => {
   const [authMode, setAuthMode] = useState<'login' | 'signup'>('login');
   const [phaseStatuses, setPhaseStatuses] = useState<Record<string, SubjectPhaseStatus>>({});
   const [phaseStatusReady, setPhaseStatusReady] = useState(false);
+  const PHASE1_HISTORY_MAX = 5;
   const isMobile = useMediaQuery('(max-width: 768px)');
   const phaseStatusStorageKey = useMemo(() => {
     if (!session) return null;
@@ -194,7 +195,6 @@ const App: React.FC = () => {
 
     // Load questions
     const questions = await quizApi.loadQuestions({ subject, topic, certification: selectedCertification });
-    setQuizQuestions(questions);
 
     // Load user records for these questions to resume learning
     const allRecords = await quizApi.getAllRecords(session.user.id);
@@ -208,6 +208,12 @@ const App: React.FC = () => {
       }
     });
 
+    const solvedIds = new Set(Object.keys(recordMap).map(id => Number(id)));
+    const unsolvedQuestions = questions.filter(q => !solvedIds.has(q.id));
+    const solvedQuestions = questions.filter(q => solvedIds.has(q.id));
+    const reorderedQuestions = [...unsolvedQuestions, ...solvedQuestions];
+
+    setQuizQuestions(reorderedQuestions);
     setInitialSolvedRecords(recordMap);
     setQuizReturnScreen('subject-select');
     setCurrentScreen('quiz');
@@ -218,11 +224,43 @@ const App: React.FC = () => {
     setQuizTitle(`${subject} 기초다지기`);
     setIsMockTest(false);
     setIsPhase1Mode(true);
-    const questions = await quizApi.getQuestionsForPhase1({ subject, certification: selectedCertification });
+
+    let history: number[][] = [];
+    try {
+      history = await quizApi.getPhase1History(
+        session.user.id,
+        selectedCertification,
+        subject,
+        PHASE1_HISTORY_MAX
+      );
+    } catch (error) {
+      console.error('Failed to load Phase 1 history:', error);
+    }
+
+    const excludeQuestionIds = Array.from(new Set(history.flatMap(entry => entry)));
+    const questions = await quizApi.getQuestionsForPhase1({
+      subject,
+      certification: selectedCertification,
+      excludeQuestionIds
+    });
     setQuizQuestions(questions);
     setInitialSolvedRecords({});
     setQuizReturnScreen('subject-select');
     setCurrentScreen('quiz');
+
+    if (questions.length > 0) {
+      const newEntry = questions.map(q => q.id);
+      try {
+        await quizApi.savePhase1History(
+          session.user.id,
+          selectedCertification,
+          subject,
+          newEntry
+        );
+      } catch (error) {
+        console.error('Failed to save Phase 1 history:', error);
+      }
+    }
   }, [session, selectedCertification]);
 
   const handlePhase1Result = useCallback((result: Phase1ResultPayload) => {
@@ -373,7 +411,7 @@ const App: React.FC = () => {
             <select
               value={selectedCertification}
               onChange={(e) => setSelectedCertification(e.target.value as Certification)}
-              className="bg-white dark:bg-slate-700 border border-slate-300 dark:border-slate-600 text-slate-700 dark:text-slate-200 rounded-md px-3 py-1 text-sm font-medium hover:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors"
+              className="bg-white dark:bg-slate-700 border border-slate-300 dark:border-slate-600 text-slate-700 dark:text-slate-200 rounded-lg px-4 py-2 text-base md:text-lg font-semibold hover:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors shadow-sm min-w-[220px]"
             >
               {CERTIFICATIONS.map((cert) => (
                 <option key={cert} value={cert}>
