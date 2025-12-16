@@ -4,6 +4,7 @@ import DashboardScreen from './components/DashboardScreen';
 import QuizScreen from './components/QuizScreen';
 import WrongNoteScreen from './components/WrongNoteScreen';
 import SubjectSelectionScreen from './components/SubjectSelectionScreen';
+import CourseRoutineScreen from './components/CourseRoutineScreen';
 import AiVariantGeneratorScreen from './components/AiVariantGeneratorScreen';
 import AdminQuestionManagementScreen from './components/AdminQuestionManagementScreen';
 import LandingScreen from './components/LandingScreen';
@@ -351,6 +352,16 @@ const App: React.FC = () => {
         }} />;
       case 'admin-questions':
         return <AdminQuestionManagementScreen navigate={navigate} session={session} />;
+      case 'course-routine':
+        return <CourseRoutineScreen
+          navigate={navigate} // Incorrect prop name in component, need to check if I updated component definition. 
+          // Component def is: onNavigate, session, plan(optional), onStartQuiz, certification.
+          // Wait, I updated CourseRoutineScreen to take { onNavigate, ... }
+          onNavigate={navigate}
+          session={session}
+          certification={selectedCertification}
+          onStartQuiz={handleStartVariantQuiz} // Using generic quiz start handler
+        />;
       case 'dashboard':
       default:
         return <DashboardScreen
@@ -478,7 +489,7 @@ const App: React.FC = () => {
             <button onClick={() => { setIsPhase1Mode(false); navigate(quizReturnScreen); }} className="bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-200 font-semibold py-1 px-3 rounded-md transition-colors">
               퀴즈 종료
             </button>
-          ) : currentScreen === 'subject-select' || currentScreen === 'wrong-note' || currentScreen === 'ai-variant-generator' || currentScreen === 'admin-questions' ? (
+          ) : currentScreen === 'subject-select' || currentScreen === 'wrong-note' || currentScreen === 'ai-variant-generator' || currentScreen === 'admin-questions' || currentScreen === 'course-routine' ? (
             <button onClick={() => navigate('dashboard')} className="bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-200 font-semibold py-1 px-3 rounded-md transition-colors">
               메인으로
             </button>

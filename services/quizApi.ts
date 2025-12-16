@@ -659,6 +659,19 @@ export const quizApi = {
     return data.map(item => item.question_text);
   },
 
+  getTotalQuestionCount: async (certification: string): Promise<number> => {
+    const { count, error } = await supabase
+      .from('questions')
+      .select('*', { count: 'exact', head: true })
+      .eq('certification', certification);
+
+    if (error) {
+      console.error('Failed to count questions', error);
+      return 0; // Fallback
+    }
+    return count || 0;
+  },
+
   // Certification Standards API
   getCertificationStandards: async (certification: string, subject?: string): Promise<CertificationStandard[]> => {
     let query = supabase
@@ -953,5 +966,151 @@ export const quizApi = {
 
     // Delete the question from database
     await quizApi.deleteQuestion(id);
+  },
+
+  // Study Plan Functions
+
+  createStudyPlan: async (userId: string, courseType: '60_day' | '90_day', certification: string): Promise<import('../types').StudyPlan> => {
+    // Check if active plan exists
+
+
+    const existing = await quizApi.getActiveStudyPlan(userId, certification);
+    if (existing) {
+      console.log('Existing active plan found:', existing);
+      return existing;
+    }
+
+    console.log('Creating new plan for:', userId, certification);
+
+    const { data, error } = await supabase
+      .from('study_plans')
+      .insert({
+        user_id: userId,
+        course_type: courseType,
+        certification: certification,
+        start_date: new Date().toISOString(),
+        current_day: 1,
+        status: 'active'
+      })
+      .select()
+      .single();
+
+    if (error) throw new Error(error.message);
+
+    return {
+      id: data.id,
+      userId: data.user_id,
+      courseType: data.course_type,
+      startDate: new Date(data.start_date),
+      currentDay: data.current_day,
+      status: data.status,
+      certification: data.certification
+    };
+  },
+
+  getActiveStudyPlan: async (userId: string, certification: string): Promise<import('../types').StudyPlan | null> => {
+    const { data, error } = await supabase
+      .from('study_plans')
+      .select('*')
+      .eq('user_id', userId)
+      .eq('status', 'active')
+      .eq('certification', certification)
+      .order('start_date', { ascending: false }) // Get the latest one if duplicates exist
+      .limit(1)
+      .maybeSingle();
+
+    if (error || !data) return null;
+
+    return {
+      id: data.id,
+      userId: data.user_id,
+      courseType: data.course_type,
+      startDate: new Date(data.start_date),
+      currentDay: data.current_day,
+      status: data.status,
+      certification: data.certification
+    };
+  },
+
+  getDailyRoutine: async (planId: string, dayNumber: number): Promise<import('../types').DailyStudyLog | null> => {
+    const { data, error } = await supabase
+      .from('daily_study_logs')
+      .select('*')
+      .eq('plan_id', planId)
+      .eq('day_number', dayNumber)
+      .maybeSingle();
+
+    if (error || !data) return null;
+
+    return {
+      id: data.id,
+      planId: data.plan_id,
+      dayNumber: data.day_number,
+      completedReading: data.completed_reading,
+      completedReview: data.completed_review,
+      completedMock: data.completed_mock,
+      targetSubjects: data.target_subjects
+    };
+  },
+
+  startDailyRoutine: async (planId: string, dayNumber: number, subjects: string[]): Promise<import('../types').DailyStudyLog> => {
+    // Check if exists
+    const existing = await quizApi.getDailyRoutine(planId, dayNumber);
+    if (existing) return existing;
+
+    const { data, error } = await supabase
+      .from('daily_study_logs')
+      .insert({
+        plan_id: planId,
+        day_number: dayNumber,
+        target_subjects: subjects,
+        completed_reading: false,
+        completed_review: false,
+        completed_mock: false
+      })
+      .select()
+      .single();
+
+    if (error) throw new Error(error.message);
+
+    return {
+      id: data.id,
+      planId: data.plan_id,
+      dayNumber: data.day_number,
+      completedReading: data.completed_reading,
+      completedReview: data.completed_review,
+      completedMock: data.completed_mock,
+      targetSubjects: data.target_subjects
+    };
+  },
+
+  updateDailyProgress: async (logId: string, updates: { reading?: boolean; review?: boolean; mock?: boolean }): Promise<void> => {
+    const payload: any = {};
+    if (updates.reading !== undefined) payload.completed_reading = updates.reading;
+    if (updates.review !== undefined) payload.completed_review = updates.review;
+    if (updates.mock !== undefined) payload.completed_mock = updates.mock;
+
+    await supabase.from('daily_study_logs').update(payload).eq('id', logId);
+  },
+
+  completeDay: async (planId: string, dayNumber: number): Promise<void> => {
+    // Advance day
+    await supabase.from('study_plans')
+      .update({ current_day: dayNumber + 1, updated_at: new Date().toISOString() })
+      .eq('id', planId);
+  },
+
+  resetStudyPlan: async (planId: string): Promise<void> => {
+    const { error } = await supabase.from('study_plans')
+      .update({
+        status: 'completed',
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', planId);
+
+    if (error) {
+      console.error('Failed to reset plan:', error);
+      throw new Error(error.message);
+    }
   }
 };

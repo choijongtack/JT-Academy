@@ -1,7 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { Screen, TopicStats } from '../types';
 import { quizApi } from '../services/quizApi';
+import { supabase } from '../services/supabaseClient';
 import { SUBJECT_TOPICS, getSubjectsByCertification, Certification } from '../constants';
+
 
 interface SubjectSelectionScreenProps {
   onSelectSubject: (subject: string, topic?: string) => void;
@@ -14,6 +16,41 @@ const SubjectSelectionScreen: React.FC<SubjectSelectionScreenProps> = ({ onSelec
   const [selectedSubject, setSelectedSubject] = useState<string | null>(null);
   const [topicStats, setTopicStats] = useState<TopicStats[]>([]);
   const [isLoading, setIsLoading] = useState(false);
+
+  // Study Plan State
+  const [activePlan, setActivePlan] = useState<import('../types').StudyPlan | null>(null);
+  const [checkingPlan, setCheckingPlan] = useState(true);
+
+  useEffect(() => {
+    supabase.auth.getSession().then(async ({ data: { session } }) => {
+      if (session) {
+        const plan = await quizApi.getActiveStudyPlan(session.user.id, certification);
+        setActivePlan(plan);
+      }
+      setCheckingPlan(false);
+    });
+  }, [certification]);
+
+  const handleStartCourse = async (type: '60_day' | '90_day') => {
+    console.log('[SubjectSelection] handleStartCourse', type, certification);
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session) {
+      console.error('No session');
+      return;
+    }
+
+    try {
+      const newPlan = await quizApi.createStudyPlan(session.user.id, type, certification);
+      console.log('New plan created:', newPlan);
+      setActivePlan(newPlan);
+      // Navigate to routine screen immediately
+      navigate('course-routine');
+    } catch (err) {
+      console.error('Course creation error:', err);
+      alert("코스 생성 실패: " + err);
+    }
+  };
+
 
   // Get subjects for the selected certification
   const subjects = getSubjectsByCertification(certification);
@@ -201,6 +238,81 @@ const SubjectSelectionScreen: React.FC<SubjectSelectionScreenProps> = ({ onSelec
           학습 진행율로 돌아가기
         </button>
       </div>
+
+      {/* Course Manager Section */}
+      <div className="bg-gradient-to-r from-slate-900 to-slate-800 dark:from-slate-800 dark:to-slate-900 rounded-2xl p-6 text-white shadow-lg border border-slate-700">
+        <div className="flex justify-between items-start mb-4">
+          <div>
+            <h3 className="text-xl font-bold flex items-center gap-2">
+              🎯 합격 패스 매니저 <span className="text-xs bg-yellow-500 text-slate-900 px-2 py-0.5 rounded font-bold">{certification}</span>
+            </h3>
+            <p className="text-slate-400 text-sm mt-1">
+              {activePlan
+                ? `${activePlan.courseType === '60_day' ? '60일' : '90일'} 완성 코스 진행 중입니다.`
+                : "시험일까지 남은 기간에 맞춰 맞춤형 커리큘럼을 시작하세요."}
+            </p>
+          </div>
+          {activePlan && (
+            <div className="text-right">
+              <p className="text-2xl font-bold text-emerald-400">Day {activePlan.currentDay}</p>
+              <p className="text-xs text-slate-400">/ {activePlan.courseType === '60_day' ? '60' : '90'}</p>
+            </div>
+          )}
+        </div>
+
+        {!checkingPlan && !activePlan && (
+          <div className="grid grid-cols-2 gap-4 mt-4">
+            <button
+              onClick={() => handleStartCourse('60_day')}
+              className="bg-white/10 hover:bg-white/20 border border-white/20 rounded-xl p-4 transition-all text-left group"
+            >
+              <div className="font-bold text-lg group-hover:text-emerald-300 transition-colors">⚡ 60일 단기 완성</div>
+              <p className="text-xs text-slate-400 mt-1">하루 2시간 집중 코스. 핵심 위주로 빠르게 정리합니다.</p>
+            </button>
+            <button
+              onClick={() => handleStartCourse('90_day')}
+              className="bg-white/10 hover:bg-white/20 border border-white/20 rounded-xl p-4 transition-all text-left group"
+            >
+              <div className="font-bold text-lg group-hover:text-blue-300 transition-colors">📅 90일 정석 완성</div>
+              <p className="text-xs text-slate-400 mt-1">하루 1시간 꾸준히. 기초부터 실전까지 완벽하게.</p>
+            </button>
+          </div>
+        )}
+
+        {activePlan && (
+          <div className="mt-4">
+            <button
+              onClick={() => navigate('course-routine')}
+              className="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-3 px-4 rounded-xl transition-colors flex items-center justify-center gap-2"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              오늘의 루틴 시작하기 (Day {activePlan.currentDay})
+            </button>
+            <div className="mt-2 text-center">
+              <button
+                onClick={async () => {
+                  if (window.confirm('정말로 현재 코스를 초기화하시겠습니까? 진행 데이터는 보존되지만 코스는 중단됩니다.')) {
+                    try {
+                      await quizApi.resetStudyPlan(activePlan.id);
+                      setActivePlan(null);
+                    } catch (e) {
+                      console.error("Reset error:", e);
+                      alert('초기화 중 오류가 발생했습니다: ' + (e as Error).message);
+                    }
+                  }
+                }}
+                className="text-xs text-slate-500 hover:text-red-400 underline"
+              >
+                코스 초기화 및 재설정
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {subjects.map((subject, index) => (
           <button
@@ -217,7 +329,7 @@ const SubjectSelectionScreen: React.FC<SubjectSelectionScreenProps> = ({ onSelec
           </button>
         ))}
       </div>
-    </div>
+    </div >
   );
 };
 
