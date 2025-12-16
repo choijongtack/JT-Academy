@@ -24,6 +24,14 @@ const isMissingStandardTableError = (error: any): boolean => {
 
 const PHASE1_HISTORY_TABLE = 'phase1_question_history';
 
+const normalizeAnswerIndex = (value: any, fallback = 0): number => {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
+
 const mapCertificationStandard = (item: any): CertificationStandard => {
   const files = (item.certification_standard_files || [])
     .sort((a: any, b: any) => (a.sort_index ?? 0) - (b.sort_index ?? 0))
@@ -68,43 +76,53 @@ const mapCertificationStandard = (item: any): CertificationStandard => {
 
 export const quizApi = {
   loadQuestions: async ({ subject, year, topic, certification }: { subject?: string; year?: number; topic?: string; certification?: string }): Promise<QuestionModel[]> => {
-    let query = supabase.from('questions').select('*');
-    if (subject) {
-      query = query.eq('subject', subject);
-    }
-    if (year) {
-      query = query.eq('year', year);
-    }
-    if (topic) {
-      if (topic === '기타' && subject && SUBJECT_TOPICS[subject]) {
-        // For 'Other', fetch questions where topic is NOT in the known list
-        // This includes literally '기타' and any other unclassified topics
-        query = query.not('topic_category', 'in', `(${SUBJECT_TOPICS[subject].map(t => `"${t}"`).join(',')})`);
-      } else {
-        query = query.eq('topic_category', topic);
+    const buildQuery = (includeCertification: boolean) => {
+      let query = supabase.from('questions').select('*');
+      if (subject) {
+        query = query.eq('subject', subject);
       }
-    }
-    if (certification) {
-      query = query.eq('certification', certification);
-    }
+      if (year) {
+        query = query.eq('year', year);
+      }
+      if (topic) {
+        if (topic === '기타' && subject && SUBJECT_TOPICS[subject]) {
+          query = query.not('topic_category', 'in', `(${SUBJECT_TOPICS[subject].map(t => `"${t}"`).join(',')})`);
+        } else {
+          query = query.eq('topic_category', topic);
+        }
+      }
+      if (includeCertification && certification) {
+        query = query.eq('certification', certification);
+      }
+      return query.order('created_at', { ascending: false });
+    };
 
-    // Order by created_at desc to show newest first
-    const { data, error } = await query.order('created_at', { ascending: false });
+    let usedFallback = false;
+    let { data, error } = await buildQuery(true);
 
-    console.log(`[quizApi] loadQuestions: Fetched ${data?.length} questions. Subject: ${subject || 'ALL'}, Certification: ${certification || 'ALL'}`);
+    if (!error && certification && (!data || data.length === 0)) {
+      console.warn(`[quizApi] loadQuestions: No questions for subject='${subject}' certification='${certification}'. Falling back to subject-only query.`);
+      usedFallback = true;
+      const fallbackResult = await buildQuery(false);
+      data = fallbackResult.data;
+      error = fallbackResult.error;
+    }
 
     if (error) {
       console.error('Error loading questions:', error);
       return [];
     }
 
-    return data.map(item => ({
+    const safeData = data || [];
+    console.log(`[quizApi] loadQuestions: Fetched ${safeData.length} questions. Subject: ${subject || 'ALL'}, Certification: ${usedFallback ? 'ALL (fallback)' : certification || 'ALL'}`);
+
+    return safeData.map(item => ({
       id: item.id,
       subject: item.subject,
       year: item.year,
       questionText: item.question_text,
       options: item.options,
-      answerIndex: item.answer_index,
+      answerIndex: normalizeAnswerIndex(item.answer_index),
       aiExplanation: item.ai_explanation,
       isVariant: item.is_variant,
       parentQuestionId: item.parent_question_id,
@@ -122,7 +140,11 @@ export const quizApi = {
   },
 
   getQuestionsForPhase1: async ({ subject, certification, excludeQuestionIds = [] }: { subject: string; certification?: string; excludeQuestionIds?: number[] }): Promise<QuestionModel[]> => {
-    const allQuestions = await quizApi.loadQuestions({ subject, certification });
+    let allQuestions = await quizApi.loadQuestions({ subject, certification });
+    if ((!allQuestions || allQuestions.length === 0) && certification) {
+      console.warn('[quizApi] Phase1 fallback to subject-only questions.', { subject, certification });
+      allQuestions = await quizApi.loadQuestions({ subject });
+    }
     const limit = 20;
     if (allQuestions.length <= limit) {
       return allQuestions;
@@ -264,7 +286,10 @@ export const quizApi = {
   },
 
   getTopicStatistics: async (subject?: string, certification?: string): Promise<import('../types').TopicStats[]> => {
-    const questions = await quizApi.loadQuestions({ subject, certification });
+    let questions = await quizApi.loadQuestions({ subject, certification });
+    if ((!questions || questions.length === 0) && certification) {
+      questions = await quizApi.loadQuestions({ subject });
+    }
 
     const topicMap = new Map<string, import('../types').TopicStats>();
 
@@ -311,7 +336,7 @@ export const quizApi = {
       year: data.year,
       questionText: data.question_text,
       options: data.options,
-      answerIndex: data.answer_index,
+      answerIndex: normalizeAnswerIndex(data.answer_index),
       aiExplanation: data.ai_explanation,
       isVariant: data.is_variant,
       parentQuestionId: data.parent_question_id,
@@ -428,7 +453,7 @@ export const quizApi = {
       year: item.year,
       questionText: item.question_text,
       options: item.options,
-      answerIndex: item.answer_index,
+      answerIndex: normalizeAnswerIndex(item.answer_index),
       aiExplanation: item.ai_explanation,
       isVariant: item.is_variant,
       parentQuestionId: item.parent_question_id,
@@ -570,7 +595,7 @@ export const quizApi = {
       year: data.year,
       questionText: data.question_text,
       options: data.options,
-      answerIndex: data.answer_index,
+      answerIndex: normalizeAnswerIndex(data.answer_index),
       aiExplanation: data.ai_explanation,
       isVariant: data.is_variant,
       parentQuestionId: data.parent_question_id,
@@ -605,7 +630,7 @@ export const quizApi = {
       year: item.year,
       questionText: item.question_text,
       options: item.options,
-      answerIndex: item.answer_index,
+      answerIndex: normalizeAnswerIndex(item.answer_index),
       aiExplanation: item.ai_explanation,
       isVariant: item.is_variant,
       parentQuestionId: item.parent_question_id,

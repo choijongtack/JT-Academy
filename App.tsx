@@ -194,7 +194,20 @@ const App: React.FC = () => {
     setIsPhase1Mode(false);
 
     // Load questions
-    const questions = await quizApi.loadQuestions({ subject, topic, certification: selectedCertification });
+    let questions = await quizApi.loadQuestions({ subject, topic, certification: selectedCertification });
+
+    if ((!questions || questions.length === 0) && topic) {
+      console.warn('[startSubjectQuiz] No questions found for subject/topic with certification, retrying without certification filter.', {
+        subject,
+        topic,
+        certification: selectedCertification
+      });
+      questions = await quizApi.loadQuestions({ subject, topic });
+    }
+
+    if (!questions || questions.length === 0) {
+      questions = await quizApi.loadQuestions({ subject });
+    }
 
     // Load user records for these questions to resume learning
     const allRecords = await quizApi.getAllRecords(session.user.id);

@@ -56,14 +56,6 @@ serve(async (req) => {
         break;
       }
 
-      case 'generateExplanation': {
-        const { prompt } = payload;
-        const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
-        const response = await model.generateContent(prompt);
-        result = response.response.text();
-        break;
-      }
-
       case 'analyzeImage': {
         const { prompt, imageParts, schema } = payload;
         const generationConfig: any = {
@@ -98,6 +90,126 @@ serve(async (req) => {
         const response = await model.generateContent(prompt);
         const text = response.response.text();
         result = JSON.parse(text.trim());
+        break;
+      }
+
+      case 'explanationChat': {
+        const { question } = payload;
+        if (!question || !Array.isArray(question.options)) {
+          throw new Error('Invalid question payload for explanation chat');
+        }
+
+        const optionList = question.options
+          .map((option: string, index: number) => `${String.fromCharCode(65 + index)}. ${option}`)
+          .join('\n');
+
+        const prompt = `
+[문제 요약]
+자격증: ${question.certification || '미지정'}
+과목: ${question.subject || '미지정'}
+문제: ${question.questionText}
+
+[선택지]
+${optionList}
+
+[정답 정보]
+${typeof question.answerIndex === 'number'
+  ? `정답 선택지: ${String.fromCharCode(65 + question.answerIndex)} (${question.options[question.answerIndex] || ''})`
+  : '정답 미제공'}
+
+[참고 자료]
+${question.rationale || question.aiExplanation || question.hint || '없음'}
+
+[지시 사항]
+1. 참고 자료는 참고만 하고 그대로 복사하지 말 것
+2. 첫 응답부터 완성된 해설을 제공할 것
+3. 아래 형식을 반드시 지킬 것
+
+[응답 형식]
+[정답 해설]
+- 정답 선택 이유를 2~3문단으로 설명
+- 필요한 계산이나 법령을 단계별로 제시
+
+[오답 분석]
+- 다른 선택지가 틀린 이유를 bullet 3개 이하로 정리
+
+[암기 포인트]
+- 유사 문제 대비 핵심 암기 포인트를 bullet 2개 이하로 정리
+
+위 형식을 그대로 사용하여 자연스러운 한국어로 답변하세요.
+`;
+
+        const model = genAI.getGenerativeModel({
+          model: "gemini-2.5-flash",
+          systemInstruction: `
+You are a professional tutor for Korean certification exams.
+Always respond in natural Korean with confident, well-structured explanations.`,
+          generationConfig: {
+            temperature: 0.3,
+            maxOutputTokens: 900
+          }
+        });
+
+        const response = await model.generateContent({
+          contents: [
+            { role: 'user', parts: [{ text: prompt }] }
+          ]
+        });
+        result = response.response.text();
+        break;
+      }
+
+      case 'explanationFollowUp': {
+        const { question, messages } = payload;
+        if (!question || !Array.isArray(question.options)) {
+          throw new Error('Invalid question payload for explanation follow-up');
+        }
+        if (!Array.isArray(messages) || messages.length === 0) {
+          throw new Error('Follow-up messages are required');
+        }
+
+        const optionList = question.options
+          .map((option: string, index: number) => `${String.fromCharCode(65 + index)}. ${option}`)
+          .join('\n');
+
+        const conversation = messages.map((msg: { role: string; content: string }) => ({
+          role: msg.role === 'user' ? 'user' : 'model',
+          parts: [{ text: msg.content }]
+        }));
+
+        const contextPrompt = `
+[문제 요약]
+자격증: ${question.certification || '미지정'}
+과목: ${question.subject || '미지정'}
+문제: ${question.questionText}
+
+[선택지]
+${optionList}
+
+[정답 정보]
+${typeof question.answerIndex === 'number'
+  ? `정답 선택지: ${String.fromCharCode(65 + question.answerIndex)} (${question.options[question.answerIndex] || ''})`
+  : '정답 미제공'}
+
+이 대화는 위 문제를 학습하는 학생과의 후속 질문에 대한 답변입니다.
+학생이 다른 주제로 벗어나려고 하면 다시 문제로 연결해 주세요.
+`;
+
+        const model = genAI.getGenerativeModel({
+          model: "gemini-2.5-flash",
+          generationConfig: {
+            temperature: 0.7,
+            maxOutputTokens: 800
+          }
+        });
+
+        const response = await model.generateContent({
+          contents: [
+            { role: 'user', parts: [{ text: contextPrompt }] },
+            ...conversation
+          ]
+        });
+        result = response.response.text();
         break;
       }
 

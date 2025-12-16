@@ -2,9 +2,10 @@
 
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 // NOTE: 실제 프로젝트의 타입 정의에 맞게 QuestionModel, AuthSession 등을 조정해야 합니다.
-import { QuestionModel, AuthSession, GeneratedVariantProblem } from '../types';
+import { QuestionModel, AuthSession } from '../types';
 import { quizApi } from '../services/quizApi';
-import { generateAIExplanation, generateFiveVariants } from '../services/geminiService';
+import { generateFiveVariants } from '../services/geminiService';
+import AIExplanationChat from './AIExplanationChat';
 import FormattedText from './FormattedText'; // FormattedText 컴포넌트 임포트
 
 interface Phase1CompletePayload {
@@ -27,6 +28,47 @@ interface QuizScreenProps {
   onPhase1Complete?: (payload: Phase1CompletePayload) => void;
 }
 
+const HINT_FORBIDDEN_PATTERNS: RegExp[] = [
+  /정답/i,
+  /정답은/i,
+  /정답입니다/i,
+  /답은/i,
+  /답입니다/i,
+  /correct answer/i,
+  /answer:/i
+];
+
+const sanitizeHintText = (text?: string | null): string => {
+  if (!text) {
+    return '';
+  }
+
+  const chunks: string[] = [];
+  let buffer = '';
+
+  for (const char of text) {
+    buffer += char;
+    if (char === '.' || char === '?' || char === '!' || char === '\n') {
+      const trimmed = buffer.trim();
+      if (trimmed.length > 0) {
+        chunks.push(trimmed);
+      }
+      buffer = '';
+    }
+  }
+
+  const trailing = buffer.trim();
+  if (trailing.length > 0) {
+    chunks.push(trailing);
+  }
+
+  const filtered = chunks.filter(
+    chunk => !HINT_FORBIDDEN_PATTERNS.some(pattern => pattern.test(chunk))
+  );
+
+  return filtered.join('\n').trim();
+};
+
 const QuizScreen: React.FC<QuizScreenProps> = ({ questions, onFinish, title, session, onStartVariantQuiz, initialSolvedRecords, examDuration, isPhase1 = false, onPhase1Complete }) => {
   // ----------------------------------------------------
   // 1. 상태 관리
@@ -37,11 +79,11 @@ const QuizScreen: React.FC<QuizScreenProps> = ({ questions, onFinish, title, ses
   const [sessionAnswers, setSessionAnswers] = useState<{ [key: number]: number }>({}); // 세션 내 사용자 응답 기록
 
   // AI/힌트 관련 상태
-  const [aiExplanation, setAiExplanation] = useState<string | null>(null);
-  const [isFetchingExplanation, setIsFetchingExplanation] = useState(false);
+  // AI/?? ?? ??
   const [isGeneratingVariant, setIsGeneratingVariant] = useState(false);
   const [variantError, setVariantError] = useState<string | null>(null);
   const [showHint, setShowHint] = useState(false);
+  const [isChatOpen, setIsChatOpen] = useState(false);
 
   // Timer state (only for timed exams like mock tests)
   const [timeRemaining, setTimeRemaining] = useState<number | null>(
@@ -81,8 +123,6 @@ const QuizScreen: React.FC<QuizScreenProps> = ({ questions, onFinish, title, ses
       setIsAnswerChecked(false);
     }
     // AI 및 힌트 상태 초기화
-    setAiExplanation(null);
-    setIsFetchingExplanation(false);
     setIsGeneratingVariant(false);
     setVariantError(null);
     setShowHint(false);
@@ -119,7 +159,11 @@ const QuizScreen: React.FC<QuizScreenProps> = ({ questions, onFinish, title, ses
 
   const currentQuestion = questions[currentQuestionIndex];
   const correctAnswerIndex = currentQuestion.answerIndex;
-  const defaultExplanation = currentQuestion.rationale || currentQuestion.aiExplanation || currentQuestion.hint || '';
+  const correctAnswerLabel = String.fromCharCode(65 + correctAnswerIndex);
+  const correctAnswerText = currentQuestion.options?.[correctAnswerIndex] || '';
+  const rawHintText = currentQuestion.aiExplanation || currentQuestion.hint || '';
+  const sanitizedHintText = useMemo(() => sanitizeHintText(rawHintText), [rawHintText]);
+  const defaultExplanation = currentQuestion.rationale || rawHintText || '';
   const phaseSubject = questions[0]?.subject || 'Phase 1';
 
 
@@ -202,12 +246,8 @@ const QuizScreen: React.FC<QuizScreenProps> = ({ questions, onFinish, title, ses
     }
   };
 
-  const handleShowExplanation = async () => {
-    setIsFetchingExplanation(true);
-    // AI 해설 생성
-    const explanation = await generateAIExplanation(currentQuestion);
-    setAiExplanation(explanation);
-    setIsFetchingExplanation(false);
+  const handleOpenExplanationChat = () => {
+    setIsChatOpen(true);
   };
 
   const handleGenerateVariant = async () => {
@@ -424,7 +464,7 @@ const QuizScreen: React.FC<QuizScreenProps> = ({ questions, onFinish, title, ses
 
         {showHint && (
           <div className="mt-3 p-4 bg-yellow-50 dark:bg-yellow-900/10 rounded-lg text-slate-700 dark:text-slate-300 text-sm animate-fadeIn">
-            <FormattedText text={currentQuestion.aiExplanation || currentQuestion.hint || "이 문제에는 힌트가 없습니다."} />
+            <FormattedText text={sanitizedHintText || "이 문제에는 힌트가 없습니다."} />
           </div>
         )}
       </div>
@@ -438,7 +478,26 @@ const QuizScreen: React.FC<QuizScreenProps> = ({ questions, onFinish, title, ses
                 {selectedAnswer === correctAnswerIndex ? '정답입니다!' : '오답입니다.'}
               </h3>
               <div className="text-slate-700 dark:text-slate-300 text-sm leading-relaxed break-words overflow-wrap-anywhere">
-                정답은 <span className="font-bold">{correctAnswerIndex + 1}번</span>입니다.
+                {selectedAnswer === correctAnswerIndex ? (
+                  '훌륭합니다! 정답을 정확히 선택했어요.'
+                ) : (
+                  <>
+                    <p>오답입니다. 이 문제의 정답은 <strong>{correctAnswerLabel}번</strong> 입니다.</p>
+                    {correctAnswerText && (
+                      <div className="mt-1 text-slate-600 dark:text-slate-200">
+
+                        <span className="font-semibold">정답 보기:</span>
+
+                        <div className="mt-1">
+
+                          <FormattedText text={correctAnswerText} />
+
+                        </div>
+
+                      </div>
+                    )}
+                  </>
+                )}
               </div>
             </div>
 
@@ -451,11 +510,11 @@ const QuizScreen: React.FC<QuizScreenProps> = ({ questions, onFinish, title, ses
 
             <div className="flex gap-2 overflow-x-auto pb-2">
               <button
-                onClick={handleShowExplanation}
-                disabled={isFetchingExplanation || !!aiExplanation}
+                onClick={handleOpenExplanationChat}
+                disabled={isChatOpen}
                 className="flex-shrink-0 bg-yellow-100 dark:bg-yellow-900/30 text-yellow-700 dark:text-yellow-300 px-4 py-2 rounded-lg text-sm font-medium hover:bg-yellow-200 dark:hover:bg-yellow-900/50 transition-colors disabled:opacity-50"
               >
-                {isFetchingExplanation ? 'AI 해설 생성 중...' : 'AI 해설 보기'}
+                {isChatOpen ? 'AI 해설 진행 중...' : 'AI 해설 보기'}
               </button>
               <button
                 onClick={handleGenerateVariant}
@@ -471,15 +530,6 @@ const QuizScreen: React.FC<QuizScreenProps> = ({ questions, onFinish, title, ses
                 재학습 하기
               </button>
             </div>
-
-            {aiExplanation && (
-              <div className="p-4 bg-slate-100 dark:bg-slate-800 rounded-xl text-sm break-words overflow-wrap-anywhere">
-                <h4 className="font-bold mb-2 text-slate-700 dark:text-slate-200">AI 상세 해설</h4>
-                <div className="text-slate-600 dark:text-slate-300 break-words overflow-wrap-anywhere">
-                  <FormattedText text={aiExplanation} />
-                </div>
-              </div>
-            )}
           </div>
         )
       }
@@ -513,6 +563,12 @@ const QuizScreen: React.FC<QuizScreenProps> = ({ questions, onFinish, title, ses
       </div>
 
       {variantError && <p className="mt-4 text-center text-sm text-red-500">{variantError}</p>}
+      <AIExplanationChat
+        key={`${currentQuestion.id}-${currentQuestionIndex}`}
+        question={currentQuestion}
+        isOpen={isChatOpen}
+        onClose={() => setIsChatOpen(false)}
+      />
     </div >
   );
 };

@@ -17,6 +17,28 @@ const fileToGenerativePart = async (file: File) => {
     };
 };
 
+const unwrapFunctionResponse = <T>(data: any, error: any, defaultMessage: string): T => {
+    if (error) {
+        const message = (error as any)?.message || (error as any)?.error || defaultMessage;
+        throw new Error(message);
+    }
+    if (data && typeof data === 'object' && 'ok' in data) {
+        if (!(data as any).ok) {
+            const message = (data as any)?.error || defaultMessage;
+            throw new Error(message);
+        }
+        const payload = (data as any).data;
+        if (payload === undefined || payload === null) {
+            throw new Error(defaultMessage);
+        }
+        return payload as T;
+    }
+    if (data === undefined || data === null) {
+        throw new Error(defaultMessage);
+    }
+    return data as T;
+};
+
 const normalizeTopicForSubject = (subject?: string, proposedTopic?: string): string => {
     const subjectTopics = subject ? SUBJECT_TOPICS[subject] : undefined;
     if (!subjectTopics || subjectTopics.length === 0) {
@@ -127,41 +149,32 @@ const resolveTopicCategory = (question: QuestionModel, candidateTopic?: string |
     return normalizeTopicForSubject(question.subject, topicToNormalize);
 };
 
-export const generateAIExplanation = async (question: QuestionModel): Promise<string> => {
-    const prompt = `
-        You are an expert tutor for electrical engineering certification exams in Korea.
-        Explain the correct answer for the following multiple-choice question clearly and concisely in KOREAN.
-        
-        Structure your response as follows:
-        1. **Correct Answer**: State the correct option and why it's correct.
-        2. **Why Others are Wrong**: Briefly explain why the other options are incorrect.
-        3. **Key Memorization Point (암기 포인트)**: Explicitly state the formulas, concepts, or values that must be memorized to solve this type of problem.
+export interface ExplanationChatMessage {
+    role: 'user' | 'assistant';
+    content: string;
+}
 
-        Question: "${question.questionText}"
-        Options:
-        A: ${question.options[0]}
-        B: ${question.options[1]}
-        C: ${question.options[2]}
-        D: ${question.options[3]}
-
-        Correct Answer: ${question.options[question.answerIndex]}
-
-        Provide your explanation in a way that is easy for a student to understand.
-    `;
-
+export const sendExplanationFollowUpMessage = async (
+    question: QuestionModel,
+    messages: ExplanationChatMessage[]
+): Promise<string> => {
     try {
         const { data, error } = await supabase.functions.invoke('gemini-proxy', {
             body: {
-                action: 'generateExplanation',
-                payload: { prompt }
+                action: 'explanationFollowUp',
+                payload: {
+                    certification: question.certification,
+                    question,
+                    messages
+                }
             }
         });
 
-        if (error) throw error;
-        return data;
+        const payload = unwrapFunctionResponse<string | unknown>(data, error, 'AI 해설 응답이 비어 있습니다.');
+        return typeof payload === 'string' ? payload : JSON.stringify(payload);
     } catch (error) {
-        console.error("Error generating AI explanation:", error);
-        return "Sorry, I couldn't generate an explanation at this time. Please try again later.";
+        console.error("Error sending explanation chat message:", error);
+        throw new Error("AI 해설 채팅 응답을 가져오지 못했습니다. 잠시 후 다시 시도해주세요.");
     }
 };
 
@@ -208,8 +221,7 @@ export const analyzeQuestionFromImage = async (imageFile: File, questionNumber: 
             }
         });
 
-        if (error) throw error;
-        return data as AnalyzedQuestionResponse;
+        return unwrapFunctionResponse<AnalyzedQuestionResponse>(data, error, 'Failed to analyze the question.');
 
     } catch (error) {
         console.error("Error analyzing question:", error);
@@ -266,8 +278,7 @@ export const generateVariantQuestion = async (question: QuestionModel): Promise<
             }
         });
 
-        if (error) throw error;
-        return data as GeneratedVariantProblem;
+        return unwrapFunctionResponse<GeneratedVariantProblem>(data, error, 'Failed to generate a variant question.');
 
     } catch (error) {
         console.error("Error generating variant question:", error);
@@ -321,8 +332,9 @@ export const analyzeQuestionsFromText = async (text: string): Promise<QuestionMo
             }
         });
 
-        if (error) throw error;
-        return JSON.parse(data) as QuestionModel[];
+        const payload = unwrapFunctionResponse<string | unknown>(data, error, 'Failed to extract questions from text.');
+        const serialized = typeof payload === 'string' ? payload : JSON.stringify(payload);
+        return JSON.parse(serialized) as QuestionModel[];
     } catch (error) {
         console.error("Error analyzing text:", error);
         throw new Error("Failed to extract questions from text.");
@@ -470,8 +482,7 @@ export const analyzeQuestionsFromImages = async (images: string[], subjectHint?:
             }
         });
 
-        if (error) throw error;
-        const questions = data as QuestionModel[];
+        const questions = unwrapFunctionResponse<QuestionModel[]>(data, error, 'Failed to extract questions from images.');
         const enforceNumberRule = isElectricalEngineerSubjectSet(allowedSubjects);
 
         // Post-processing: Enforce subject rules and STRICT diagram filtering
@@ -603,8 +614,7 @@ export const generateFiveVariants = async (originalQuestion: QuestionModel, exam
             }
         });
 
-        if (error) throw error;
-        const variants = data;
+        const variants = unwrapFunctionResponse<any[]>(data, error, 'Failed to generate variant questions.');
         return variants.map((v: any) => ({
             ...v,
             id: 0, // ID will be assigned by DB
@@ -685,14 +695,13 @@ export async function classifyQuestionTopic(
             }
         });
 
-        if (error) throw error;
-
+        const payload = unwrapFunctionResponse<string | unknown>(data, error, 'Failed to classify question topic.');
         // Handle potential string response if schema wasn't strictly enforced by proxy logic for generic content
         // But our proxy logic for generateContent with schema handles JSON parsing if schema is present?
         // Actually my proxy code for generateContent returns response.text.
         // So I need to parse it here.
 
-        const text = typeof data === 'string' ? data : JSON.stringify(data);
+        const text = typeof payload === 'string' ? payload : JSON.stringify(payload);
         const cleanText = text.replace(/```json/g, '').replace(/```/g, '').trim();
         const parsed = JSON.parse(cleanText);
 
@@ -808,10 +817,8 @@ export const extractTextFromImages = async (images: string[]): Promise<string> =
             }
         });
 
-        if (error) throw error;
-
-        // data should be the text response
-        return typeof data === 'string' ? data : JSON.stringify(data);
+        const payload = unwrapFunctionResponse<string | unknown>(data, error, 'Failed to extract text from images.');
+        return typeof payload === 'string' ? payload : JSON.stringify(payload);
 
     } catch (error) {
         console.error("Error extracting text from images:", error);

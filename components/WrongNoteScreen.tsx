@@ -115,7 +115,9 @@ const WrongNoteScreen: React.FC<WrongNoteScreenProps> = ({ navigate, startReview
             className="bg-slate-100 dark:bg-slate-700 p-4 rounded-lg"
           >
             <div className="flex-grow mb-3">
-              <p className="font-semibold text-slate-800 dark:text-slate-200"><FormattedText text={item.question.questionText} /></p>
+              <div className="font-semibold text-slate-800 dark:text-slate-200">
+                <FormattedText text={item.question.questionText} />
+              </div>
               <div className="flex items-center text-sm text-slate-500 dark:text-slate-400 mt-1">
                 <span>{item.question.subject}</span>
                 <span className="mx-2">|</span>
