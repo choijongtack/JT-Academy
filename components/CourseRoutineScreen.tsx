@@ -75,13 +75,15 @@ const CourseRoutineScreen: React.FC<CourseRoutineScreenProps> = ({ session, plan
                 let newRatio = 0;
 
                 if (progress < learningCutoff) {
-                    const requiredDailyNew = Math.ceil(totalQuestions / (planDays * learningCutoff));
-                    const newCount = requiredDailyNew;
-                    let reviewCount = dailyCapacity - newCount;
-                    if (reviewCount < 0) reviewCount = 10;
+                    // User Request: 60% New Concept, 40% Review(+Supplement)
+                    // We calculate capacity first, then split it.
+
+                    const newCount = Math.ceil(dailyCapacity * 0.6);
+                    const reviewCount = Math.floor(dailyCapacity * 0.4);
 
                     setDailyStats({ newCount, reviewCount });
                 } else {
+                    // Final Phase: 100% Review
                     setDailyStats({ newCount: 0, reviewCount: dailyCapacity });
                 }
 
@@ -89,6 +91,8 @@ const CourseRoutineScreen: React.FC<CourseRoutineScreenProps> = ({ session, plan
                     newCount: Math.max(0, prev.newCount),
                     reviewCount: Math.max(10, prev.reviewCount)
                 }));
+                // Reverted Logic: limiting review count reduced study volume too much.
+                // We will fill the gap with "Reinforcement" questions instead.
 
                 if (!log) {
                     const allSubjects = getSubjectsByCertification(plan.certification as any);
@@ -96,6 +100,9 @@ const CourseRoutineScreen: React.FC<CourseRoutineScreenProps> = ({ session, plan
                     const todaysSubject = allSubjects[subjectIndex];
 
                     log = await quizApi.startDailyRoutine(plan.id, plan.currentDay, [todaysSubject]);
+                    console.log('[CourseRoutine] Created new log:', log);
+                } else {
+                    console.log('[CourseRoutine] Loaded existing log:', log);
                 }
                 setDailyLog(log);
             } catch (err) {
@@ -135,24 +142,53 @@ const CourseRoutineScreen: React.FC<CourseRoutineScreenProps> = ({ session, plan
         if (!dailyLog || !plan) return;
         const wrongAnswers = await quizApi.getWrongAnswers(session.user.id);
 
-        const count = dailyStats.reviewCount;
-        const ids = wrongAnswers.slice(0, count).map(w => w.questionId);
-        const questions = [];
-        for (const id of ids) {
+        const targetCount = dailyStats.reviewCount;
+
+        // 1. Get Wrong Answers first
+        const reviewIds = wrongAnswers.slice(0, targetCount).map(w => w.questionId);
+        let questions: QuestionModel[] = [];
+
+        for (const id of reviewIds) {
             const q = await quizApi.getQuestionById(id);
             if (q) questions.push(q);
         }
 
+        // 2. Fill Gap with "Reinforcement" (Random from current subject) if not enough wrong answers
+        // This ensures the user maintains the high daily study volume (Repetition).
+        if (questions.length < targetCount) {
+            const shortfall = targetCount - questions.length;
+            const subject = dailyLog.targetSubjects[0]; // Fallback to current subject for drill
+
+            // Fetch extras
+            const extraQs = await quizApi.loadQuestions({ subject, certification: plan.certification });
+            // Filter out duplicates if possible (simple check)
+            const existingIds = new Set(questions.map(q => q.id));
+            const extras = extraQs
+                .filter(q => !existingIds.has(q.id))
+                .sort(() => 0.5 - Math.random()) // Shuffle
+                .slice(0, shortfall);
+
+            questions.push(...extras);
+
+            if (questions.length > 0) {
+                // Inform user nicely? Or just let them study.
+                // Ideally a Toast, but relying on Quiz Title is subtle enough.
+            }
+        }
+
         if (questions.length === 0) {
-            alert("복습할 오답이 없습니다! 훌륭합니다.");
-            await quizApi.updateDailyProgress(dailyLog.id, { review: true });
-            setDailyLog(prev => prev ? { ...prev, completedReview: true } : null);
+            // Should rarely happen given fallback, but safety net
+            alert("복습할 문항을 가져올 수 없습니다.");
             return;
         }
 
+        const title = reviewIds.length < targetCount
+            ? `Day ${plan.currentDay}: 오답 복습 + 핵심 보충 (${questions.length}문항)`
+            : `Day ${plan.currentDay}: 오답 복습`;
+
         onStartQuiz(
             questions,
-            `Day ${plan.currentDay}: 오답 복습`,
+            title,
             { planId: plan.id, logId: dailyLog.id, type: 'review' }
         );
     };
@@ -236,8 +272,8 @@ const CourseRoutineScreen: React.FC<CourseRoutineScreenProps> = ({ session, plan
                             <div className="flex items-center gap-4">
                                 <div className={`w-8 h-8 rounded-full flex items-center justify-center font-bold ${dailyLog.completedReview ? 'bg-emerald-500 text-white' : 'bg-slate-200 text-slate-600'}`}>2</div>
                                 <div>
-                                    <h3 className="font-bold text-lg dark:text-slate-200">오답 복습 ({dailyStats.reviewCount}문항)</h3>
-                                    <p className="text-sm text-slate-500">자동 배정된 복습량</p>
+                                    <h3 className="font-bold text-lg dark:text-slate-200">오답 복습 및 보충 학습 ({dailyStats.reviewCount}문항)</h3>
+                                    <p className="text-sm text-slate-500">오답 우선 배정 후 부족분은 보충 학습으로 채워집니다.</p>
                                 </div>
                             </div>
                             <button
