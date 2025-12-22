@@ -192,6 +192,11 @@ export const extractLeadingQuestionNumber = (text: string): number | null => {
         return parseInt(altMatch[1], 10);
     }
 
+    const labelMatch = normalized.match(/^(문항|문제)\s*(\d{1,3})/);
+    if (labelMatch) {
+        return parseInt(labelMatch[2], 10);
+    }
+
     return null;
 };
 

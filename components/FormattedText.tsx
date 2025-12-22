@@ -88,7 +88,7 @@ const FormattedText: React.FC<FormattedTextProps> = memo(({ text }) => {
     normalizedText = normalizedText.replace(/([.?!])\s+(?=[가-힣A-Z\d])/g, '$1\n');
 
     // LaTeX 명령어 포함 여부 확인 (AI 데이터의 안전장치)
-    const hasLatexCommands = /\\(frac|partial|sqrt|times|pm|theta|pi|infty|int|sum|lim|alpha|beta|omega|Omega|mu|epsilon|lambda|sigma|rho|phi|cdot|approx|neq|le|ge|nabla|text)/.test(normalizedText);
+    const hasLatexCommands = /\\(frac|partial|sqrt|times|pm|theta|pi|infty|int|sum|lim|alpha|beta|omega|Omega|mu|epsilon|lambda|sigma|rho|phi|cdot|approx|neq|le|ge|nabla|text|overline)/.test(normalizedText);
     const hasDelimiters = /\$\$|\$/.test(normalizedText);
 
     let finalText = normalizedText;

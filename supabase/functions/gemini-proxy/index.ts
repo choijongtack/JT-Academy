@@ -6,6 +6,30 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
+const logPayloadMetrics = (action: string, payload: any) => {
+  try {
+    const metrics: string[] = [];
+    if (payload?.imageParts?.length) {
+      const first = payload.imageParts[0];
+      const base64Length = first?.inlineData?.data?.length || 0;
+      metrics.push(`imageParts=${payload.imageParts.length}`);
+      metrics.push(`firstPartSize≈${base64Length} chars`);
+    }
+    if (payload?.prompt) {
+      const promptLength = typeof payload.prompt === 'string'
+        ? payload.prompt.length
+        : Array.isArray(payload.prompt) ? payload.prompt.length : 0;
+      metrics.push(`promptLength=${promptLength}`);
+    }
+    if (payload?.questions?.length) {
+      metrics.push(`questions=${payload.questions.length}`);
+    }
+    console.log(`[PayloadMetrics][${action}] ${metrics.join(' | ') || 'no notable metrics'}`);
+  } catch (err) {
+    console.warn('Failed to log payload metrics', err);
+  }
+};
+
 serve(async (req) => {
   // Handle CORS preflight requests
   if (req.method === 'OPTIONS') {
@@ -22,6 +46,7 @@ serve(async (req) => {
     const { action, payload } = await req.json();
 
     console.log(`Processing action: ${action}`);
+    logPayloadMetrics(action, payload);
 
     let result;
 
@@ -71,7 +96,10 @@ serve(async (req) => {
         const parts = [{ text: prompt }, ...imageParts];
         const response = await model.generateContent(parts);
         const text = response.response.text();
-        result = JSON.parse(text.trim());
+
+        // Robust cleaning of AI output (remove markdown backticks if present)
+        const cleanJson = text.replace(/^```json\s*/, '').replace(/\s*```$/, '').trim();
+        result = JSON.parse(cleanJson);
         break;
       }
 
@@ -89,7 +117,10 @@ serve(async (req) => {
 
         const response = await model.generateContent(prompt);
         const text = response.response.text();
-        result = JSON.parse(text.trim());
+
+        // Robust cleaning
+        const cleanJson = text.replace(/^```json\s*/, '').replace(/\s*```$/, '').trim();
+        result = JSON.parse(cleanJson);
         break;
       }
 
@@ -114,8 +145,8 @@ ${optionList}
 
 [정답 정보]
 ${typeof question.answerIndex === 'number'
-  ? `정답 선택지: ${String.fromCharCode(65 + question.answerIndex)} (${question.options[question.answerIndex] || ''})`
-  : '정답 미제공'}
+            ? `정답 선택지: ${String.fromCharCode(65 + question.answerIndex)} (${question.options[question.answerIndex] || ''})`
+            : '정답 미제공'}
 
 [참고 자료]
 ${question.rationale || question.aiExplanation || question.hint || '없음'}
@@ -188,8 +219,8 @@ ${optionList}
 
 [정답 정보]
 ${typeof question.answerIndex === 'number'
-  ? `정답 선택지: ${String.fromCharCode(65 + question.answerIndex)} (${question.options[question.answerIndex] || ''})`
-  : '정답 미제공'}
+            ? `정답 선택지: ${String.fromCharCode(65 + question.answerIndex)} (${question.options[question.answerIndex] || ''})`
+            : '정답 미제공'}
 
 이 대화는 위 문제를 학습하는 학생과의 후속 질문에 대한 답변입니다.
 학생이 다른 주제로 벗어나려고 하면 다시 문제로 연결해 주세요.
@@ -217,14 +248,20 @@ ${typeof question.answerIndex === 'number'
         throw new Error(`Unknown action: ${action}`);
     }
 
-    return new Response(JSON.stringify(result), {
+    return new Response(JSON.stringify({ ok: true, data: result }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
 
   } catch (error) {
-    console.error('Error:', error);
-    return new Response(JSON.stringify({ error: error.message }), {
-      status: 500,
+    console.error('Edge Function Error:', error);
+    // Return 200 with ok: false so client can read the JSON error body
+    return new Response(JSON.stringify({
+      ok: false,
+      error: error.message,
+      stack: error.stack,
+      details: "Error occurred in gemini-proxy Edge Function"
+    }), {
+      status: 200,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
   }

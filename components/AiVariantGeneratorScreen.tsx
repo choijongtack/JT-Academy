@@ -12,6 +12,7 @@ import StandardUploadSection from './ai-variant-generator/StandardUploadSection'
 import SubjectSelectionSection from './ai-variant-generator/SubjectSelectionSection';
 import SaveConfirmationDialog from './ai-variant-generator/SaveConfirmationDialog';
 import DiagramReviewModal from './ai-variant-generator/DiagramReviewModal';
+import ManualDiagramReview from './ai-variant-generator/ManualDiagramReview';
 import SubjectRangesSection from './ai-variant-generator/SubjectRangesSection';
 
 interface AiVariantGeneratorScreenProps {
@@ -69,8 +70,11 @@ const AiVariantGeneratorScreen: React.FC<AiVariantGeneratorScreenProps> = ({ nav
         handleProcessStart,
         handleSaveCurrentSubject,
         extractedQuestions,
+        updateExtractedQuestion,
         generatedVariants,
-        previewImages
+        previewImages,
+        isManualReviewOpen,
+        setIsManualReviewOpen
     } = useAiProcessing({
         certification,
         selectedSubject,
@@ -173,6 +177,15 @@ const AiVariantGeneratorScreen: React.FC<AiVariantGeneratorScreenProps> = ({ nav
                 </div>
             )}
 
+            {isManualReviewOpen && (
+                <ManualDiagramReview
+                    questions={extractedQuestions}
+                    onUpdateQuestion={updateExtractedQuestion}
+                    onClose={() => setIsManualReviewOpen(false)}
+                    onApply={() => setIsManualReviewOpen(false)}
+                />
+            )}
+
             {pendingSubjectPackage && requiresDiagramReview && isDiagramReviewOpen && (
                 <DiagramReviewModal
                     subjectName={pendingSubjectPackage.subjectName}
@@ -216,8 +229,8 @@ const AiVariantGeneratorScreen: React.FC<AiVariantGeneratorScreenProps> = ({ nav
                 {/* 3. Question File Upload */}
                 <div
                     className={`mt-8 border-2 border-dashed rounded-lg p-8 text-center transition-colors ${isDragging
-                            ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20'
-                            : 'border-slate-300 dark:border-slate-600'
+                        ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20'
+                        : 'border-slate-300 dark:border-slate-600'
                         }`}
                     onDragEnter={handleDragEnter}
                     onDragLeave={handleDragLeave}
@@ -230,14 +243,14 @@ const AiVariantGeneratorScreen: React.FC<AiVariantGeneratorScreenProps> = ({ nav
                             기출문제 파일 업로드
                         </h3>
                         <p className="text-slate-500 dark:text-slate-400 text-sm">
-                            PDF 또는 이미지(JPG, PNG) 파일을 드래그하여 놓거나 선택하세요.<br />
+                            PDF, 이미지(JPG, PNG), DOCX 또는 TXT 파일을 드래그하여 놓거나 선택하세요.<br />
                             (최대 10개, 파일당 10MB)
                         </p>
 
                         <input
                             type="file"
                             multiple
-                            accept=".pdf,image/*"
+                            accept=".pdf,.txt,image/*"
                             onChange={handleFileChange}
                             className="hidden"
                             id="question-file-upload"

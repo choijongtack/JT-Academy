@@ -5,6 +5,7 @@ export interface QuestionModel {
   subject: string;
   year: number;
   questionText: string;
+  questionNumber?: number | null;
   options: string[];
   answerIndex: number;
   aiExplanation: string | null;
@@ -30,6 +31,7 @@ export interface QuestionModel {
     width: number;
     height: number;
   };
+  needsManualDiagram?: boolean;     // Flag for questions that need manual diagram insertion (e.g., from DOCX)
 }
 
 export interface UserQuizRecord {
@@ -164,4 +166,24 @@ export interface SaveCertificationStandardInput {
     charCount: number;
     tokenEstimate: number;
   }>;
+}
+
+export interface StudyPlan {
+  id: string;
+  userId: string;
+  courseType: '60_day' | '90_day';
+  startDate: Date;
+  currentDay: number;
+  status: 'active' | 'completed' | 'abandoned';
+  certification: string;
+}
+
+export interface DailyStudyLog {
+  id: string;
+  planId: string;
+  dayNumber: number;
+  completedReading: boolean;
+  completedReview: boolean;
+  completedMock: boolean;
+  targetSubjects: string[];
 }

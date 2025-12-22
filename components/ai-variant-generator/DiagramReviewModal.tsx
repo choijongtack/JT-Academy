@@ -254,23 +254,60 @@ const DiagramReviewModal: React.FC<DiagramReviewModalProps> = ({
         const pageIndex = activeItem.info.pageIndex;
         const naturalSize = naturalSizes.get(pageIndex);
         if (!naturalSize) return;
+
         setBoundsByQuestion(prev => {
             const current = prev.get(activeItem.questionIndex);
-            const widthValid = current && Number.isFinite(current.width) && current.width > MIN_CROP_SIZE;
-            const heightValid = current && Number.isFinite(current.height) && current.height > MIN_CROP_SIZE;
-            if (widthValid && heightValid) {
-                return prev;
+
+            // To keep it simple: We only override if we think the current bounds are "Blocking Movement" (too big).
+            const existing = current || sanitizeBounds(activeItem.info.bounds);
+
+            // Check if bounds are "stuck" (height > 85% of image)
+            const isTooTall = existing.height > naturalSize.height * 0.85;
+
+            if (!isTooTall && current) {
+                return prev; // Keep user adjustments or safe bounds
             }
-            const defaultWidth = Math.max(MIN_CROP_SIZE, Math.round(naturalSize.width * 0.35));
-            const defaultHeight = Math.max(MIN_CROP_SIZE, Math.round(naturalSize.height * 0.35));
-            const centeredBounds: DiagramBounds = {
-                x: Math.max(0, Math.round((naturalSize.width - defaultWidth) / 2)),
-                y: Math.max(0, Math.round((naturalSize.height - defaultHeight) / 2)),
-                width: defaultWidth,
-                height: defaultHeight
-            };
+
+            // If too tall, shrink to 60%
+            let width = existing.width;
+            let height = existing.height;
+            let x = existing.x;
+            let y = existing.y;
+
+            if (isTooTall) {
+                height = Math.round(naturalSize.height * 0.6);
+                y = Math.round((naturalSize.height - height) / 2);
+            }
+
+            // Also clamp/center if completely invalid
+            if (!current) {
+                const defaultWidth = Math.max(MIN_CROP_SIZE, Math.round(naturalSize.width * 0.35));
+                const defaultHeight = Math.max(MIN_CROP_SIZE, Math.round(naturalSize.height * 0.35));
+                if (!isTooTall) {
+                    // Only override width/height if we didn't just fix them above. 
+                    // Wait, if !current, we fall into this block.
+                    // The logic above set 'height' based on 'existing' (which was info.bounds).
+                    // If info.bounds was huge, 'isTooTall' is true. 'height' is now 60%. 'y' is centered.
+                    // So we should usage those values.
+                } else {
+                    // If NOT too tall, but also NOT current (fresh load), and we want default fallback?
+                    // Usually sanitizeBounds handles this.
+                    // So actually we can skip this block if 'isTooTall' handled it.
+                }
+
+                // If we didn't trigger 'isTooTall', but we have no 'current', we might want defaults?
+                // But typically we trust 'info.bounds' unless they are missing. 'sanitizeBounds' handles missing.
+                // So we can assume 'existing' is good enough if not 'isTooTall'.
+                if (!isTooTall) {
+                    width = existing.width;
+                    height = existing.height;
+                    x = existing.x;
+                    y = existing.y;
+                }
+            }
+
             const next = new Map(prev);
-            next.set(activeItem.questionIndex, centeredBounds);
+            next.set(activeItem.questionIndex, { x, y, width, height });
             return next;
         });
     }, [activeItem, naturalSizes]);
@@ -280,6 +317,14 @@ const DiagramReviewModal: React.FC<DiagramReviewModalProps> = ({
     const naturalHeight = activeNaturalSize?.height ?? 1;
     const displayWidth = naturalWidth * zoom;
     const displayHeight = naturalHeight * zoom;
+
+    const imageRef = React.useRef<HTMLImageElement>(null);
+
+    useEffect(() => {
+        if (imageRef.current?.complete && imageRef.current?.naturalWidth) {
+            registerImageSize(activeItem.info.pageIndex, imageRef.current.naturalWidth, imageRef.current.naturalHeight);
+        }
+    }, [activeIndex, previewSrc]);
 
     return (
         <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 px-4 py-6">
@@ -384,8 +429,10 @@ const DiagramReviewModal: React.FC<DiagramReviewModalProps> = ({
 
                         <div className="p-4 bg-slate-50 dark:bg-slate-800 rounded-2xl border border-slate-200 dark:border-slate-700 flex flex-col items-center justify-center min-h-[420px]">
                             {previewSrc ? (
-                                <div className="relative border border-slate-200 dark:border-slate-700 rounded-lg shadow-inner overflow-hidden" style={{ width: displayWidth, height: displayHeight }}>
+                                <div className="relative border border-slate-200 dark:border-slate-700 rounded-lg shadow-inner" style={{ width: displayWidth, height: displayHeight }}>
                                     <img
+                                        key={`img-${activeItem.info.pageIndex}`}
+                                        ref={imageRef}
                                         src={previewSrc}
                                         alt="문항 원본"
                                         draggable={false}
@@ -394,7 +441,8 @@ const DiagramReviewModal: React.FC<DiagramReviewModalProps> = ({
                                     />
                                     {readyForEditing && (
                                         <div
-                                            className="absolute border-2 border-amber-400 bg-amber-200/20 cursor-move"
+                                            key={`box-${activeItem.questionIndex}`}
+                                            className="absolute border-4 border-amber-500 bg-amber-400/30 cursor-move z-10"
                                             style={{
                                                 left: activeBounds.x * zoom,
                                                 top: activeBounds.y * zoom,

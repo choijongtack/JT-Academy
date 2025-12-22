@@ -1,8 +1,10 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { QuestionModel, AuthSession } from '../types';
 import { quizApi } from '../services/quizApi';
+import { supabase } from '../services/supabaseClient';
+import FormattedText from './FormattedText';
 import { isAdmin } from '../services/authService';
-import { CERTIFICATIONS, CERTIFICATION_SUBJECTS, SUBJECT_TOPICS } from '../constants';
+import { CERTIFICATIONS, SUBJECT_TOPICS } from '../constants';
 
 const normalizeKey = (value?: string | null) => (value ?? '').replace(/\s+/g, ' ').trim();
 
@@ -28,7 +30,15 @@ interface AdminQuestionManagementScreenProps {
 
 const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps> = ({ session, navigate }) => {
     const [questions, setQuestions] = useState<ManagedQuestion[]>([]);
-    const [filteredQuestions, setFilteredQuestions] = useState<ManagedQuestion[]>([]);
+    const [totalCount, setTotalCount] = useState<number | null>(null);
+    const [availableYears, setAvailableYears] = useState<number[]>([]);
+    const [availableSubjects, setAvailableSubjects] = useState<string[]>([]);
+    const [availableTopicsBySubject, setAvailableTopicsBySubject] = useState<Record<string, string[]>>({});
+    const [availableCertifications, setAvailableCertifications] = useState<string[]>([]);
+    const [subjectsByCertification, setSubjectsByCertification] = useState<Record<string, string[]>>({});
+    const [yearsByCertification, setYearsByCertification] = useState<Record<string, number[]>>({});
+    const [yearsByCertificationSubject, setYearsByCertificationSubject] = useState<Record<string, number[]>>({});
+    const [topicsByCertificationSubject, setTopicsByCertificationSubject] = useState<Record<string, string[]>>({});
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [successMessage, setSuccessMessage] = useState<string | null>(null);
@@ -39,10 +49,13 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
     const [filterYear, setFilterYear] = useState<string>('');
     const [filterTopic, setFilterTopic] = useState<string>('');
     const [searchText, setSearchText] = useState('');
+    const [scrollTop, setScrollTop] = useState(0);
 
     // Pagination
     const [currentPage, setCurrentPage] = useState(1);
     const itemsPerPage = 20;
+    const rowHeight = 56;
+    const listHeight = 520;
 
     // Edit mode
     const [editingId, setEditingId] = useState<number | null>(null);
@@ -62,13 +75,25 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
         }
     }, [session, navigate]);
 
-    // Load all questions
+    // Load questions with server-side filtering
     const loadQuestions = useCallback(async () => {
         setLoading(true);
         setError(null);
         try {
-            const allQuestions = await quizApi.getAllQuestions();
-            const normalizedQuestions: ManagedQuestion[] = allQuestions.map(question => {
+            const yearValue = filterYear ? parseInt(filterYear, 10) : undefined;
+            const { questions: fetchedQuestions, count } = await quizApi.loadQuestionsPaged({
+                certification: filterCertification || undefined,
+                subject: filterSubject || undefined,
+                topic: filterTopic || undefined,
+                year: Number.isNaN(yearValue ?? NaN) ? undefined : yearValue,
+                search: searchText || undefined,
+                page: currentPage,
+                pageSize: itemsPerPage
+            });
+
+            setTotalCount(count ?? null);
+
+            const normalizedQuestions: ManagedQuestion[] = fetchedQuestions.map(question => {
                 const normalizedSubject = normalizeSubjectValue(question.subject);
                 const normalizedTopic = normalizeTopicValue(question.topicCategory);
                 return {
@@ -78,55 +103,187 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
                 };
             });
             setQuestions(normalizedQuestions);
-            setFilteredQuestions(normalizedQuestions);
         } catch (err) {
             setError('문제 목록을 불러오는데 실패했습니다.');
             console.error(err);
         } finally {
             setLoading(false);
         }
+    }, [filterCertification, filterSubject, filterTopic, filterYear, searchText, currentPage]);
+
+    const loadFilterOptions = useCallback(async () => {
+        const batchSize = 1000;
+        const years = new Set<number>();
+        const subjects = new Set<string>();
+        const certifications = new Set<string>();
+        const topicsBySubject = new Map<string, Set<string>>();
+        const subjectsByCert = new Map<string, Set<string>>();
+        const yearsByCert = new Map<string, Set<number>>();
+        const yearsByCertSubject = new Map<string, Set<number>>();
+        const topicsByCertSubject = new Map<string, Set<string>>();
+        let offset = 0;
+
+        while (true) {
+            const { data, error } = await supabase
+                .from('questions')
+                .select('year,subject,topic_category,certification')
+                .order('id', { ascending: true })
+                .range(offset, offset + batchSize - 1);
+
+            if (error) {
+                console.error('Error loading filter options:', error);
+                break;
+            }
+
+            const rows = data || [];
+            if (rows.length === 0) break;
+
+            rows.forEach(row => {
+                const subjectValue = normalizeKey(row.subject);
+                const certificationValue = normalizeKey(row.certification);
+                const topicValue = normalizeKey(row.topic_category);
+
+                if (row.year) years.add(row.year);
+                if (subjectValue) {
+                    subjects.add(subjectValue);
+                    if (topicValue) {
+                        if (!topicsBySubject.has(subjectValue)) {
+                            topicsBySubject.set(subjectValue, new Set());
+                        }
+                        topicsBySubject.get(subjectValue)!.add(topicValue);
+                    }
+                }
+                if (certificationValue) {
+                    certifications.add(certificationValue);
+                    if (subjectValue) {
+                        if (!subjectsByCert.has(certificationValue)) {
+                            subjectsByCert.set(certificationValue, new Set());
+                        }
+                        subjectsByCert.get(certificationValue)!.add(subjectValue);
+                    }
+                    if (row.year) {
+                        if (!yearsByCert.has(certificationValue)) {
+                            yearsByCert.set(certificationValue, new Set());
+                        }
+                        yearsByCert.get(certificationValue)!.add(row.year);
+                    }
+                    if (subjectValue && row.year) {
+                        const key = `${certificationValue}::${subjectValue}`;
+                        if (!yearsByCertSubject.has(key)) {
+                            yearsByCertSubject.set(key, new Set());
+                        }
+                        yearsByCertSubject.get(key)!.add(row.year);
+                    }
+                    if (subjectValue && topicValue) {
+                        const key = `${certificationValue}::${subjectValue}`;
+                        if (!topicsByCertSubject.has(key)) {
+                            topicsByCertSubject.set(key, new Set());
+                        }
+                        topicsByCertSubject.get(key)!.add(topicValue);
+                    }
+                }
+            });
+
+            if (rows.length < batchSize) break;
+            offset += batchSize;
+        }
+
+        setAvailableYears(Array.from(years).sort((a, b) => b - a));
+        setAvailableSubjects(Array.from(subjects).sort((a, b) => a.localeCompare(b)));
+        setAvailableCertifications(Array.from(certifications).sort((a, b) => a.localeCompare(b)));
+
+        const topicsRecord: Record<string, string[]> = {};
+        topicsBySubject.forEach((topicSet, subject) => {
+            topicsRecord[subject] = Array.from(topicSet).sort((a, b) => a.localeCompare(b));
+        });
+        setAvailableTopicsBySubject(topicsRecord);
+
+        const subjectsByCertRecord: Record<string, string[]> = {};
+        subjectsByCert.forEach((subjectSet, cert) => {
+            subjectsByCertRecord[cert] = Array.from(subjectSet).sort((a, b) => a.localeCompare(b));
+        });
+        setSubjectsByCertification(subjectsByCertRecord);
+
+        const yearsByCertRecord: Record<string, number[]> = {};
+        yearsByCert.forEach((yearSet, cert) => {
+            yearsByCertRecord[cert] = Array.from(yearSet).sort((a, b) => b - a);
+        });
+        setYearsByCertification(yearsByCertRecord);
+
+        const yearsByCertSubjectRecord: Record<string, number[]> = {};
+        yearsByCertSubject.forEach((yearSet, key) => {
+            yearsByCertSubjectRecord[key] = Array.from(yearSet).sort((a, b) => b - a);
+        });
+        setYearsByCertificationSubject(yearsByCertSubjectRecord);
+
+        const topicsByCertSubjectRecord: Record<string, string[]> = {};
+        topicsByCertSubject.forEach((topicSet, key) => {
+            topicsByCertSubjectRecord[key] = Array.from(topicSet).sort((a, b) => a.localeCompare(b));
+        });
+        setTopicsByCertificationSubject(topicsByCertSubjectRecord);
     }, []);
 
+    // Initial load and reload when filters change
     useEffect(() => {
         loadQuestions();
     }, [loadQuestions]);
 
-    // Apply filters
     useEffect(() => {
-        let filtered = [...questions];
+        loadFilterOptions();
+    }, [loadFilterOptions]);
 
-        if (filterSubject) {
-            filtered = filtered.filter(q => q.normalizedSubject === filterSubject);
-        }
-        if (filterCertification) {
-            filtered = filtered.filter(q => q.certification === filterCertification);
-        }
-        if (filterYear) {
-            const yearNum = parseInt(filterYear, 10);
-            filtered = filtered.filter(q => q.year === yearNum);
-        }
-        if (filterTopic) {
-            filtered = filtered.filter(q => q.normalizedTopic === filterTopic);
-        }
-        if (searchText) {
-            const search = searchText.toLowerCase();
-            filtered = filtered.filter(q =>
-                q.questionText.toLowerCase().includes(search) ||
-                q.id.toString().includes(search)
-            );
-        }
+    // Local filtering (Search and Year)
+    const displayQuestions = questions;
 
-        setFilteredQuestions(filtered);
-        setCurrentPage(1); // Reset to first page when filters change
-    }, [questions, filterSubject, filterCertification, filterYear, filterTopic, searchText]);
+    // Reset page when search or server-side filters change
+    useEffect(() => {
+        setCurrentPage(1);
+    }, [filterCertification, filterSubject, filterYear, filterTopic, searchText]);
+
+    useEffect(() => {
+        setScrollTop(0);
+    }, [currentPage]);
+
 
     // Get unique years
-    const uniqueYears = Array.from(new Set(questions.map(q => q.year))).sort((a, b) => b - a);
+    const availableSubjectsForFilter = useMemo(() => {
+        if (!filterCertification) return availableSubjects;
+        return subjectsByCertification[filterCertification] || [];
+    }, [availableSubjects, filterCertification, subjectsByCertification]);
+
+    const availableYearsForFilter = useMemo(() => {
+        if (filterCertification && filterSubject) {
+            const key = `${filterCertification}::${filterSubject}`;
+            return yearsByCertificationSubject[key] || [];
+        }
+        if (filterCertification) {
+            return yearsByCertification[filterCertification] || [];
+        }
+        return availableYears;
+    }, [availableYears, filterCertification, filterSubject, yearsByCertification, yearsByCertificationSubject]);
+
+    const availableTopics = useMemo(() => {
+        if (!filterSubject) return [];
+        if (filterCertification) {
+            const key = `${filterCertification}::${filterSubject}`;
+            return topicsByCertificationSubject[key] || [];
+        }
+        return availableTopicsBySubject[filterSubject] || [];
+    }, [availableTopicsBySubject, filterCertification, filterSubject, topicsByCertificationSubject]);
+
+    const uniqueYears = availableYearsForFilter;
 
     // Pagination
-    const totalPages = Math.ceil(filteredQuestions.length / itemsPerPage);
+    const totalPages = Math.max(1, Math.ceil((totalCount ?? 0) / itemsPerPage));
     const startIndex = (currentPage - 1) * itemsPerPage;
-    const paginatedQuestions = filteredQuestions.slice(startIndex, startIndex + itemsPerPage);
+    const paginatedQuestions = displayQuestions;
+
+    const shouldVirtualize = !editingId && !deleteConfirmId;
+    const totalRows = paginatedQuestions.length;
+    const visibleCount = Math.ceil(listHeight / rowHeight) + 4;
+    const startRow = Math.max(0, Math.floor(scrollTop / rowHeight) - 2);
+    const endRow = Math.min(totalRows, startRow + visibleCount);
+    const offsetY = startRow * rowHeight;
 
     // Handle edit
     const startEdit = (question: ManagedQuestion) => {
@@ -173,6 +330,7 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
             // Force reload questions to ensure fresh data
             console.log('Reloading questions...');
             await loadQuestions();
+            await loadFilterOptions();
             console.log('Questions reloaded');
         } catch (err: any) {
             const errorMessage = err?.message || '문제 수정에 실패했습니다.';
@@ -207,50 +365,14 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
             setDeleteConfirmId(null);
             setDeleteWithStorage(true);
             await loadQuestions();
+            await loadFilterOptions();
         } catch (err) {
             setError('문제 삭제에 실패했습니다.');
             console.error(err);
         }
     };
 
-    const availableSubjects = useMemo(() => {
-        const pool = filterCertification
-            ? questions.filter(q => q.certification === filterCertification)
-            : questions;
-        const set = new Set<string>();
-        pool.forEach(q => set.add(q.normalizedSubject));
-        const subjects = Array.from(set);
-
-        // Define global order based on constants
-        const globalSubjectOrder = Object.values(CERTIFICATION_SUBJECTS).flat();
-
-        return subjects.sort((a, b) => {
-            const indexA = globalSubjectOrder.indexOf(a);
-            const indexB = globalSubjectOrder.indexOf(b);
-
-            // Both in list: compare indices
-            if (indexA !== -1 && indexB !== -1) {
-                return indexA - indexB;
-            }
-            // Only A in list: A comes first
-            if (indexA !== -1) return -1;
-            // Only B in list: B comes first
-            if (indexB !== -1) return 1;
-            // Neither in list: sort alphabetically
-            return a.localeCompare(b);
-        });
-    }, [questions, filterCertification]);
-
-    const availableTopics = useMemo(() => {
-        if (!filterSubject) return [];
-        const pool = questions.filter(q => {
-            if (filterCertification && q.certification !== filterCertification) return false;
-            return q.normalizedSubject === filterSubject;
-        });
-        const set = new Set<string>();
-        pool.forEach(q => set.add(q.normalizedTopic));
-        return Array.from(set);
-    }, [questions, filterCertification, filterSubject]);
+    const certificationOptions = availableCertifications.length > 0 ? availableCertifications : CERTIFICATIONS;
 
     if (loading) {
         return <div className="text-center p-8">로딩 중...</div>;
@@ -309,7 +431,7 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
                             className="w-full px-3 py-2 border border-slate-300 dark:border-slate-600 rounded-lg bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100"
                         >
                             <option value="">전체</option>
-                            {CERTIFICATIONS.map(cert => (
+                            {certificationOptions.map(cert => (
                                 <option key={cert} value={cert}>{cert}</option>
                             ))}
                         </select>
@@ -328,7 +450,7 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
                             className="w-full px-3 py-2 border border-slate-300 dark:border-slate-600 rounded-lg bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100"
                         >
                             <option value="">전체</option>
-                            {availableSubjects.map(subject => (
+                            {availableSubjectsForFilter.map(subject => (
                                 <option key={subject} value={subject}>{subject}</option>
                             ))}
                         </select>
@@ -383,7 +505,7 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
 
                 <div className="flex justify-between items-center">
                     <p className="text-sm text-slate-600 dark:text-slate-400">
-                        총 {filteredQuestions.length}개의 문제
+                        총 {totalCount ?? displayQuestions.length}개의 문제
                     </p>
                     <button
                         onClick={() => {
@@ -429,154 +551,214 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
                                 </th>
                             </tr>
                         </thead>
-                        <tbody className="divide-y divide-slate-200 dark:divide-slate-600">
-                            {paginatedQuestions.map((question) => (
-                                <tr key={question.id} className="hover:bg-slate-50 dark:hover:bg-slate-700">
-                                    <td className="px-4 py-3 text-sm text-slate-900 dark:text-slate-100">
-                                        {question.id}
-                                    </td>
-                                    <td className="px-4 py-3 text-sm text-slate-900 dark:text-slate-100">
-                                        {editingId === question.id ? (
-                                            <select
-                                                value={editForm.certification || ''}
-                                                onChange={(e) => setEditForm({ ...editForm, certification: e.target.value, subject: '' })}
-                                                className="w-full px-2 py-1 border rounded bg-white dark:bg-slate-700"
-                                            >
-                                                {CERTIFICATIONS.map(cert => (
-                                                    <option key={cert} value={cert}>{cert}</option>
-                                                ))}
-                                            </select>
-                                        ) : (
-                                            question.certification || '-'
-                                        )}
-                                    </td>
-                                    <td className="px-4 py-3 text-sm text-slate-900 dark:text-slate-100">
-                                        {editingId === question.id ? (
-                                            <input
-                                                type="text"
-                                                value={editForm.subject || ''}
-                                                onChange={(e) => setEditForm({ ...editForm, subject: e.target.value })}
-                                                className="w-full px-2 py-1 border rounded bg-white dark:bg-slate-700"
-                                                placeholder="과목 입력"
-                                            />
-                                        ) : (
-                                            question.normalizedSubject === '기타' && question.subject
-                                                ? `기타 (${question.subject})`
-                                                : question.normalizedSubject
-                                        )}
-                                    </td>
-                                    <td className="px-4 py-3 text-sm text-slate-900 dark:text-slate-100">
-                                        {editingId === question.id ? (
-                                            <input
-                                                type="number"
-                                                value={editForm.year || ''}
-                                                onChange={(e) => setEditForm({ ...editForm, year: parseInt(e.target.value) })}
-                                                className="w-20 px-2 py-1 border rounded bg-white dark:bg-slate-700"
-                                            />
-                                        ) : (
-                                            question.year
-                                        )}
-                                    </td>
-                                    <td className="px-4 py-3 text-sm text-slate-900 dark:text-slate-100">
-                                        {editingId === question.id ? (() => {
-                                            // Get available topics based on certification and subject
-                                            const currentSubject = editForm.subject || question.normalizedSubject;
-                                            const availableTopicsForEdit = SUBJECT_TOPICS[currentSubject] || [];
-
-                                            return (
+                        {!shouldVirtualize && (
+                            <tbody className="divide-y divide-slate-200 dark:divide-slate-600">
+                                {paginatedQuestions.map((question) => (
+                                    <tr key={question.id} className="hover:bg-slate-50 dark:hover:bg-slate-700">
+                                        <td className="px-4 py-3 text-sm text-slate-900 dark:text-slate-100">
+                                            {question.id}
+                                        </td>
+                                        <td className="px-4 py-3 text-sm text-slate-900 dark:text-slate-100">
+                                            {editingId === question.id ? (
                                                 <select
-                                                    value={editForm.topicCategory || ''}
-                                                    onChange={(e) => setEditForm({ ...editForm, topicCategory: e.target.value })}
+                                                    value={editForm.certification || ''}
+                                                    onChange={(e) => setEditForm({ ...editForm, certification: e.target.value, subject: '' })}
                                                     className="w-full px-2 py-1 border rounded bg-white dark:bg-slate-700"
                                                 >
-                                                    <option value="">주제 선택</option>
-                                                    {availableTopicsForEdit.map(topic => (
-                                                        <option key={topic} value={topic}>{topic}</option>
+                                                    {CERTIFICATIONS.map(cert => (
+                                                        <option key={cert} value={cert}>{cert}</option>
                                                     ))}
                                                 </select>
-                                            );
-                                        })() : (
-                                            question.normalizedTopic === '기타' && question.topicCategory
-                                                ? `기타 (${question.topicCategory})`
-                                                : question.normalizedTopic
-                                        )}
-                                    </td>
-                                    <td className="px-4 py-3 text-sm text-slate-900 dark:text-slate-100 max-w-xs">
-                                        <button
-                                            onClick={() => setSelectedQuestion(question)}
-                                            className="text-left hover:text-blue-600 dark:hover:text-blue-400 underline decoration-dotted truncate block w-full"
-                                            title="클릭하여 전체 내용 보기"
-                                        >
-                                            {question.questionText.substring(0, 50)}...
-                                        </button>
-                                    </td>
-                                    <td className="px-4 py-3 text-sm">
-                                        {editingId === question.id ? (
-                                            <div className="flex gap-2">
-                                                <button
-                                                    onClick={() => saveEdit(question.id)}
-                                                    className="bg-green-600 hover:bg-green-700 text-white px-3 py-1 rounded text-xs"
-                                                >
-                                                    저장
-                                                </button>
-                                                <button
-                                                    onClick={cancelEdit}
-                                                    className="bg-slate-600 hover:bg-slate-700 text-white px-3 py-1 rounded text-xs"
-                                                >
-                                                    취소
-                                                </button>
-                                            </div>
-                                        ) : deleteConfirmId === question.id ? (
-                                            <div className="space-y-2">
-                                                <p className="text-xs text-red-600 dark:text-red-400 font-semibold">삭제하시겠습니까?</p>
-                                                <div className="flex items-center gap-2 mb-2">
-                                                    <input
-                                                        type="checkbox"
-                                                        id={`delete-storage-${question.id}`}
-                                                        checked={deleteWithStorage}
-                                                        onChange={(e) => setDeleteWithStorage(e.target.checked)}
-                                                        className="rounded"
-                                                    />
-                                                    <label htmlFor={`delete-storage-${question.id}`} className="text-xs text-slate-700 dark:text-slate-300">
-                                                        파일도 삭제
-                                                    </label>
-                                                </div>
+                                            ) : (
+                                                question.certification || '-'
+                                            )}
+                                        </td>
+                                        <td className="px-4 py-3 text-sm text-slate-900 dark:text-slate-100">
+                                            {editingId === question.id ? (
+                                                <input
+                                                    type="text"
+                                                    value={editForm.subject || ''}
+                                                    onChange={(e) => setEditForm({ ...editForm, subject: e.target.value })}
+                                                    className="w-full px-2 py-1 border rounded bg-white dark:bg-slate-700"
+                                                    placeholder="과목 입력"
+                                                />
+                                            ) : (
+                                                question.normalizedSubject === '기타' && question.subject
+                                                    ? `기타 (${question.subject})`
+                                                    : question.normalizedSubject
+                                            )}
+                                        </td>
+                                        <td className="px-4 py-3 text-sm text-slate-900 dark:text-slate-100">
+                                            {editingId === question.id ? (
+                                                <input
+                                                    type="number"
+                                                    value={editForm.year || ''}
+                                                    onChange={(e) => setEditForm({ ...editForm, year: parseInt(e.target.value) })}
+                                                    className="w-20 px-2 py-1 border rounded bg-white dark:bg-slate-700"
+                                                />
+                                            ) : (
+                                                question.year
+                                            )}
+                                        </td>
+                                        <td className="px-4 py-3 text-sm text-slate-900 dark:text-slate-100">
+                                            {editingId === question.id ? (() => {
+                                                // Get available topics based on certification and subject
+                                                const currentSubject = editForm.subject || question.normalizedSubject;
+                                                const availableTopicsForEdit = SUBJECT_TOPICS[currentSubject] || [];
+
+                                                return (
+                                                    <select
+                                                        value={editForm.topicCategory || ''}
+                                                        onChange={(e) => setEditForm({ ...editForm, topicCategory: e.target.value })}
+                                                        className="w-full px-2 py-1 border rounded bg-white dark:bg-slate-700"
+                                                    >
+                                                        <option value="">주제 선택</option>
+                                                        {availableTopicsForEdit.map(topic => (
+                                                            <option key={topic} value={topic}>{topic}</option>
+                                                        ))}
+                                                    </select>
+                                                );
+                                            })() : (
+                                                question.normalizedTopic === '기타' && question.topicCategory
+                                                    ? `기타 (${question.topicCategory})`
+                                                    : question.normalizedTopic
+                                            )}
+                                        </td>
+                                        <td className="px-4 py-3 text-sm text-slate-900 dark:text-slate-100 max-w-xs">
+                                            <button
+                                                onClick={() => setSelectedQuestion(question)}
+                                                className="text-left hover:text-blue-600 dark:hover:text-blue-400 underline decoration-dotted truncate block w-full"
+                                                title="클릭하여 전체 내용 보기"
+                                            >
+                                                {question.questionText.substring(0, 50)}...
+                                            </button>
+                                        </td>
+                                        <td className="px-4 py-3 text-sm">
+                                            {editingId === question.id ? (
                                                 <div className="flex gap-2">
                                                     <button
-                                                        onClick={() => executeDelete(question.id)}
-                                                        className="bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded text-xs"
+                                                        onClick={() => saveEdit(question.id)}
+                                                        className="bg-green-600 hover:bg-green-700 text-white px-3 py-1 rounded text-xs"
                                                     >
-                                                        확인
+                                                        저장
                                                     </button>
                                                     <button
-                                                        onClick={cancelDelete}
+                                                        onClick={cancelEdit}
                                                         className="bg-slate-600 hover:bg-slate-700 text-white px-3 py-1 rounded text-xs"
                                                     >
                                                         취소
                                                     </button>
                                                 </div>
-                                            </div>
-                                        ) : (
-                                            <div className="flex gap-2">
-                                                <button
-                                                    onClick={() => startEdit(question)}
-                                                    className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded text-xs"
-                                                >
-                                                    수정
-                                                </button>
-                                                <button
-                                                    onClick={() => confirmDelete(question.id)}
-                                                    className="bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded text-xs"
-                                                >
-                                                    삭제
-                                                </button>
-                                            </div>
-                                        )}
-                                    </td>
-                                </tr>
-                            ))}
-                        </tbody>
+                                            ) : deleteConfirmId === question.id ? (
+                                                <div className="space-y-2">
+                                                    <p className="text-xs text-red-600 dark:text-red-400 font-semibold">삭제하시겠습니까?</p>
+                                                    <div className="flex items-center gap-2 mb-2">
+                                                        <input
+                                                            type="checkbox"
+                                                            id={`delete-storage-${question.id}`}
+                                                            checked={deleteWithStorage}
+                                                            onChange={(e) => setDeleteWithStorage(e.target.checked)}
+                                                            className="rounded"
+                                                        />
+                                                        <label htmlFor={`delete-storage-${question.id}`} className="text-xs text-slate-700 dark:text-slate-300">
+                                                            파일도 삭제
+                                                        </label>
+                                                    </div>
+                                                    <div className="flex gap-2">
+                                                        <button
+                                                            onClick={() => executeDelete(question.id)}
+                                                            className="bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded text-xs"
+                                                        >
+                                                            확인
+                                                        </button>
+                                                        <button
+                                                            onClick={cancelDelete}
+                                                            className="bg-slate-600 hover:bg-slate-700 text-white px-3 py-1 rounded text-xs"
+                                                        >
+                                                            취소
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            ) : (
+                                                <div className="flex gap-2">
+                                                    <button
+                                                        onClick={() => startEdit(question)}
+                                                        className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded text-xs"
+                                                    >
+                                                        수정
+                                                    </button>
+                                                    <button
+                                                        onClick={() => confirmDelete(question.id)}
+                                                        className="bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded text-xs"
+                                                    >
+                                                        삭제
+                                                    </button>
+                                                </div>
+                                            )}
+                                        </td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        )}
                     </table>
+                    {shouldVirtualize && (
+                        <div
+                            className="border-t border-slate-200 dark:border-slate-600 overflow-y-auto"
+                            style={{ height: listHeight }}
+                            onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
+                        >
+                            <div style={{ height: totalRows * rowHeight, position: 'relative' }}>
+                                <div style={{ transform: `translateY(${offsetY}px)` }}>
+                                    {paginatedQuestions.slice(startRow, endRow).map((question) => (
+                                        <div
+                                            key={question.id}
+                                            className="grid grid-cols-[80px_160px_160px_80px_160px_1fr_140px] border-b border-slate-200 dark:border-slate-600 text-sm text-slate-900 dark:text-slate-100"
+                                            style={{ height: rowHeight }}
+                                        >
+                                            <div className="px-4 py-3">{question.id}</div>
+                                            <div className="px-4 py-3">{question.certification || '-'}</div>
+                                            <div className="px-4 py-3">
+                                                {question.normalizedSubject === '기타' && question.subject
+                                                    ? `기타 (${question.subject})`
+                                                    : question.normalizedSubject}
+                                            </div>
+                                            <div className="px-4 py-3">{question.year}</div>
+                                            <div className="px-4 py-3">
+                                                {question.normalizedTopic === '기타' && question.topicCategory
+                                                    ? `기타 (${question.topicCategory})`
+                                                    : question.normalizedTopic}
+                                            </div>
+                                            <div className="px-4 py-3 max-w-xs">
+                                                <button
+                                                    onClick={() => setSelectedQuestion(question)}
+                                                    className="text-left hover:text-blue-600 dark:hover:text-blue-400 underline decoration-dotted truncate block w-full"
+                                                    title="클릭하여 전체 내용 보기"
+                                                >
+                                                    {question.questionText.substring(0, 50)}...
+                                                </button>
+                                            </div>
+                                            <div className="px-4 py-3">
+                                                <div className="flex gap-2">
+                                                    <button
+                                                        onClick={() => startEdit(question)}
+                                                        className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded text-xs"
+                                                    >
+                                                        수정
+                                                    </button>
+                                                    <button
+                                                        onClick={() => confirmDelete(question.id)}
+                                                        className="bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded text-xs"
+                                                    >
+                                                        삭제
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        </div>
+                    )}
                 </div>
 
                 {/* Pagination */}
@@ -601,7 +783,7 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
                         <div className="hidden sm:flex-1 sm:flex sm:items-center sm:justify-between">
                             <div>
                                 <p className="text-sm text-slate-700 dark:text-slate-300">
-                                    <span className="font-medium">{startIndex + 1}</span> - <span className="font-medium">{Math.min(startIndex + itemsPerPage, filteredQuestions.length)}</span> / <span className="font-medium">{filteredQuestions.length}</span>
+                                    <span className="font-medium">{startIndex + 1}</span> - <span className="font-medium">{Math.min(startIndex + itemsPerPage, displayQuestions.length)}</span> / <span className="font-medium">{totalCount ?? displayQuestions.length}</span>
                                 </p>
                             </div>
                             <div>
@@ -694,9 +876,9 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
                                 {/* Question Text */}
                                 <div>
                                     <h4 className="font-semibold text-slate-700 dark:text-slate-300 mb-2">문제</h4>
-                                    <p className="text-slate-900 dark:text-slate-100 whitespace-pre-wrap">
-                                        {selectedQuestion.questionText}
-                                    </p>
+                                    <div className="text-slate-900 dark:text-slate-100 whitespace-pre-wrap">
+                                        <FormattedText text={selectedQuestion.questionText} />
+                                    </div>
                                 </div>
 
                                 {/* Options */}
@@ -713,7 +895,7 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
                                                         }`}
                                                 >
                                                     <span className="font-semibold mr-2">{idx + 1}.</span>
-                                                    <span>{option}</span>
+                                                    <FormattedText text={option} />
                                                     {idx === selectedQuestion.answerIndex && (
                                                         <span className="ml-2 text-xs font-semibold text-green-600 dark:text-green-300">
                                                             (정답)

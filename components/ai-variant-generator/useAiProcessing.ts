@@ -26,7 +26,8 @@ import {
     analyzeQuestionsFromText,
     analyzeQuestionsFromImages,
     extractTextFromImages,
-    batchClassifyTopics
+    batchClassifyTopics,
+    generateQuestionDetails
 } from '../../services/geminiService';
 import {
     slugifyForStorage,
@@ -71,6 +72,108 @@ export interface SubjectRangeConfig {
     questionStart: number;
     questionEnd: number;
 }
+
+interface PlainTextQuestionSegment {
+    questionNumber: number | null;
+    text: string;
+}
+
+interface MetadataJob {
+    questionId: number;
+    question: QuestionModel;
+}
+
+const normalizePlainText = (text: string): string => {
+    return text
+        .replace(/\r\n/g, '\n')
+        .replace(/\t/g, ' ')
+        .replace(/\u00A0/g, ' ')
+        .replace(/[ ]{2,}/g, ' ')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+};
+
+const segmentPlainTextQuestions = (text: string): PlainTextQuestionSegment[] => {
+    const normalized = normalizePlainText(text);
+    if (!normalized) return [];
+
+    const segments: PlainTextQuestionSegment[] = [];
+    const regex = /(^|\n)\s*(?:\[\s*문제\s*\]\s*)?(\d{1,3})[\.\)]\s+([\s\S]*?)(?=(\n\s*(?:\[\s*문제\s*\]\s*)?\d{1,3}[\.\)]\s+)|$)/g;
+    let match: RegExpExecArray | null;
+
+    while ((match = regex.exec(normalized)) !== null) {
+        const fullMatch = match[0].startsWith('\n') ? match[0].slice(1) : match[0];
+        const questionNumber = parseInt(match[2], 10);
+        segments.push({
+            questionNumber: Number.isNaN(questionNumber) ? null : questionNumber,
+            text: fullMatch.trim()
+        });
+    }
+
+    if (segments.length === 0) {
+        segments.push({ questionNumber: null, text: normalized });
+    }
+
+    return segments;
+};
+
+const filterSegmentsForRange = (
+    segments: PlainTextQuestionSegment[],
+    minQuestionNumber: number,
+    maxQuestionNumber: number,
+    allowFallbackToAll: boolean
+): PlainTextQuestionSegment[] => {
+    if (segments.length === 0) return [];
+    const filtered = segments.filter(segment => {
+        if (segment.questionNumber === null) return false;
+        return segment.questionNumber >= minQuestionNumber && segment.questionNumber <= maxQuestionNumber;
+    });
+    if (filtered.length === 0 && allowFallbackToAll) return segments;
+    return filtered;
+};
+
+const chunkSegmentsForGemini = (segments: PlainTextQuestionSegment[], maxChars: number = 3600): string[] => {
+    const chunks: string[] = [];
+    let buffer = '';
+
+    for (const segment of segments) {
+        const t = segment.text.trim();
+        if (!t) continue;
+        if (buffer && buffer.length + t.length + 2 > maxChars) {
+            chunks.push(buffer);
+            buffer = '';
+        }
+        buffer = buffer ? `${buffer}\n\n${t}` : t;
+    }
+
+    if (buffer.trim()) chunks.push(buffer);
+    return chunks;
+};
+
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+const DIAGRAM_PATTERN = /\[그림\s*있음\]/;
+
+const BACKGROUND_METADATA_BATCH_SIZE = 5;
+const BACKGROUND_METADATA_DELAY_MS = 400;
+const BACKGROUND_DETAIL_DELAY_MS = 200;
+
+const applyDiagramIndicators = (questions: QuestionModel[]): QuestionModel[] => {
+    return questions.map(q => {
+        const needsDiagram = DIAGRAM_PATTERN.test(q.questionText || '');
+        if (!needsDiagram) return q;
+        const alreadyTagged = (q.questionText || '').includes('[다이어그램]');
+        const questionText = q.questionText || '';
+        const taggedText = alreadyTagged
+            ? questionText
+            : questionText.replace(/^(\d+\.\s*)/, '$1[다이어그램] ');
+        return {
+            ...q,
+            questionText: taggedText,
+            needsManualDiagram: true
+        };
+    });
+};
 
 
 // Constants for Range Templates
@@ -178,6 +281,7 @@ export const useAiProcessing = ({
     const [isSavingSubject, setIsSavingSubject] = useState(false);
     const [isDiagramReviewOpen, setIsDiagramReviewOpen] = useState(false);
     const [isDiagramReviewComplete, setIsDiagramReviewComplete] = useState(false);
+    const [isManualReviewOpen, setIsManualReviewOpen] = useState(false);
 
     // --- Year State ---
     const [yearInput, setYearInput] = useState<number | ''>('');
@@ -185,6 +289,9 @@ export const useAiProcessing = ({
     const [yearError, setYearError] = useState<string | null>(null);
     const [isYearTouched, setIsYearTouched] = useState(false);
     const [forceYearValidation, setForceYearValidation] = useState(false);
+    const metadataQueueRef = useRef<MetadataJob[]>([]);
+    const metadataWorkerActiveRef = useRef(false);
+    const componentActiveRef = useRef(true);
 
 
     // Effects
@@ -199,6 +306,13 @@ export const useAiProcessing = ({
     useEffect(() => {
         setSubjectRanges(createDefaultSubjectRanges(certification));
     }, [certification]);
+
+    useEffect(() => {
+        return () => {
+            componentActiveRef.current = false;
+            metadataQueueRef.current = [];
+        };
+    }, []);
 
 
     // Helper: Year Validation
@@ -250,14 +364,38 @@ export const useAiProcessing = ({
 
     // Helper: File Validation
     const validateFile = (file: File): string | null => {
-        const validTypes = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'];
-        if (!validTypes.includes(file.type)) {
-            return `${file.name}: 지원하지 않는 파일 형식입니다. (JPG, PNG, WebP, PDF만 가능)`;
+        const validTypes = [
+            'image/jpeg',
+            'image/png',
+            'image/webp',
+            'application/pdf',
+            'text/plain'
+        ];
+        const isTxtExtension = file.name.toLowerCase().endsWith('.txt');
+        if (!validTypes.includes(file.type) && !isTxtExtension) {
+            return `${file.name}: 지원하지 않는 파일 형식입니다. (JPG, PNG, WebP, PDF, TXT만 가능)`;
         }
         if (file.size > MAX_FILE_SIZE) {
             return `${file.name}: 파일 크기가 너무 큽니다. (최대 10MB)`;
         }
         return null;
+    };
+
+    const updateExtractedQuestion = (index: number, updates: Partial<QuestionModel>) => {
+        setExtractedQuestions(prev => {
+            const next = [...prev];
+            if (next[index]) {
+                next[index] = { ...next[index], ...updates };
+            }
+            return next;
+        });
+
+        setPendingSubjectPackage(prev => {
+            if (!prev || !prev.questions[index]) return prev;
+            const updated = [...prev.questions];
+            updated[index] = { ...updated[index], ...updates };
+            return { ...prev, questions: updated };
+        });
     };
 
     const handleFilesAdded = (files: File[]) => {
@@ -411,10 +549,13 @@ export const useAiProcessing = ({
             const allImages: string[] = [];
             const questionPageLookup = new Map<number, number>();
             const pdfSources: PdfSourceMeta[] = [];
+            const txtFiles: File[] = [];
+            let txtSegments: PlainTextQuestionSegment[] = [];
             let detectedYear: number | null = null;
             let totalPdfPages = 0;
             let hasImageFiles = false;
             let hasPdfFiles = false;
+            let hasTxtFiles = false;
             xObjectUrlCacheRef.current = new Map();
 
             const renderPdfPageToImage = async (pdfData: Uint8Array, pageNumber: number): Promise<string> => {
@@ -470,6 +611,9 @@ export const useAiProcessing = ({
                         reader.readAsDataURL(file);
                     });
                     allImages.push(base64);
+                } else if (file.type === 'text/plain' || file.name.toLowerCase().endsWith('.txt')) {
+                    hasTxtFiles = true;
+                    txtFiles.push(file);
                 } else {
                     setError(`지원하지 않는 파일입니다: ${file.name}`);
                     setIsProcessing(false);
@@ -478,10 +622,26 @@ export const useAiProcessing = ({
             }
 
             const hasTextPages = pdfSources.length > 0;
+            if (hasTxtFiles && (hasPdfFiles || hasImageFiles)) {
+                setError('TXT 파일은 PDF/이미지와 함께 업로드할 수 없습니다.');
+                setIsProcessing(false);
+                return;
+            }
             if (hasTextPages && hasImageFiles) {
                 setError('텍스트 기반 PDF 이미지 파일을 함께 처리할 수 없습니다.');
                 setIsProcessing(false);
                 return;
+            }
+
+            if (hasTxtFiles) {
+                setStatusMessage('TXT 텍스트 정리 중...');
+                const texts = await Promise.all(txtFiles.map(file => file.text()));
+                txtSegments = segmentPlainTextQuestions(texts.join('\n\n---FILE BREAK---\n\n'));
+                if (txtSegments.length === 0) {
+                    setError('TXT 파일에서 문제 텍스트를 찾지 못했습니다.');
+                    setIsProcessing(false);
+                    return;
+                }
             }
 
             const useTextMode = hasPdfFiles && !hasImageFiles;
@@ -604,7 +764,7 @@ export const useAiProcessing = ({
                 const safeStartPage = Math.max(1, subjectBatch.startPage);
                 const safeEndPage = Math.max(safeStartPage, subjectBatch.endPage);
 
-                if (safeStartPage > totalPages) continue;
+                if (!hasTxtFiles && safeStartPage > totalPages) continue;
 
                 const startIdx = Math.max(0, safeStartPage - 1);
                 const endIdx = Math.min(safeEndPage - 1, totalPages - 1);
@@ -614,6 +774,118 @@ export const useAiProcessing = ({
                 const maxQuestionNumber = Math.max(minQuestionNumber, subjectBatch.questionEnd);
 
                 setCurrentSubject(subjectName);
+
+                // ---------------- TXT MODE ---------------
+                if (hasTxtFiles) {
+                    const relevantSegments = filterSegmentsForRange(
+                        txtSegments,
+                        minQuestionNumber,
+                        maxQuestionNumber,
+                        Boolean(selectedSubject)
+                    );
+                    const diagramNumberSet = new Set<number>();
+                    relevantSegments.forEach(segment => {
+                        if (segment.questionNumber !== null && DIAGRAM_PATTERN.test(segment.text)) {
+                            diagramNumberSet.add(segment.questionNumber);
+                        }
+                    });
+
+                    if (relevantSegments.length === 0) {
+                        setStatusMessage(`${subjectName}: TXT 범위에서 문항을 찾지 못했습니다.`);
+                        continue;
+                    }
+
+                    const chunks = chunkSegmentsForGemini(relevantSegments, 3600);
+                    const subjectQuestions: QuestionModel[] = [];
+
+                    for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
+                        if (cancelProcessingRef.current) break;
+                        setStatusMessage(`${subjectName} TXT 분석 중... (${chunkIndex + 1}/${chunks.length})`);
+                        try {
+                            console.log(`[TXT] ${subjectName} chunk ${chunkIndex + 1}/${chunks.length} length=${chunks[chunkIndex].length}`);
+                            const parsed = await analyzeQuestionsFromText(chunks[chunkIndex]);
+                            subjectQuestions.push(...parsed);
+                        } catch (chunkError) {
+                            console.error('TXT chunk analyze failed', chunkError);
+                        }
+                    }
+
+                    if (cancelProcessingRef.current) {
+                        setStatusMessage('작업이 중단되었습니다.');
+                        setCurrentSubject(null);
+                        break;
+                    }
+
+                    const isQuestionInRange = (question: QuestionModel) => {
+                        if (selectedSubject) return true;
+                        const detectedNumber = extractLeadingQuestionNumber(question.questionText);
+                        if (detectedNumber !== null) {
+                            return detectedNumber >= minQuestionNumber && detectedNumber <= maxQuestionNumber;
+                        }
+                        return true;
+                    };
+
+                    const filteredQuestions = subjectQuestions.filter(isQuestionInRange);
+                    const rangeBasedLimit = selectedSubject
+                        ? QUESTIONS_PER_SUBJECT
+                        : (maxQuestionNumber - minQuestionNumber + 1);
+
+                    let enforcedSubjectQuestions = enforceSubjectQuestionQuota(
+                        filteredQuestions,
+                        subjectQuestions,
+                        rangeBasedLimit,
+                        isQuestionInRange
+                    );
+                    enforcedSubjectQuestions = applyDiagramIndicators(enforcedSubjectQuestions);
+                    enforcedSubjectQuestions = enforcedSubjectQuestions.map(question => {
+                        const detectedNumber = extractLeadingQuestionNumber(question.questionText || '');
+                        if (detectedNumber !== null && diagramNumberSet.has(detectedNumber)) {
+                            return {
+                                ...question,
+                                needsManualDiagram: true
+                            };
+                        }
+                        return question;
+                    });
+                    enforcedSubjectQuestions = enforcedSubjectQuestions.map((question, idx) => {
+                        const detectedNumber = extractLeadingQuestionNumber(question.questionText || '');
+                        return {
+                            ...question,
+                            subject: subjectName,
+                            questionNumber: detectedNumber ?? question.questionNumber ?? null
+                        };
+                    });
+
+                    const startIndex = allQuestions.length;
+                    allQuestions.push(...enforcedSubjectQuestions);
+                    setExtractedQuestions(enforcedSubjectQuestions);
+
+                    const requiresManualDiagram = enforcedSubjectQuestions.some(q => q.needsManualDiagram);
+                    setIsManualReviewOpen(requiresManualDiagram);
+
+                    const subjectData: any = {
+                        subject: subjectName,
+                        extractedQuestions: enforcedSubjectQuestions,
+                        questionRange: { start: minQuestionNumber, end: maxQuestionNumber },
+                        savedAt: new Date().toISOString()
+                    };
+                    blobDownload(subjectData, subjectName);
+
+                    setCompletedSubjects(prev => [...prev, subjectName]);
+                    setStatusMessage(`${subjectName} 완료!`);
+
+                    setPendingSubjectPackage(buildSubjectPackage(subjectName, startIndex, enforcedSubjectQuestions, []));
+                    setIsBatchConfirmed(false);
+                    setIsDiagramReviewOpen(false);
+                    setIsDiagramReviewComplete(true);
+
+                    setIsPaused(true);
+                    const nextSubjects = processingRanges.slice(Math.max(0, currentIndex + 1)).map(s => s.name);
+                    setPendingSubjects(nextSubjects);
+
+                    await waitForResume();
+                    continue;
+                }
 
                 // ---------------- TEXT MODE ---------------
                 if (useTextMode) {
@@ -897,25 +1169,7 @@ export const useAiProcessing = ({
                     const enforcedSubjectQuestions = enforceSubjectQuestionQuota(subjectCandidates, subjectRawQuestions, rangeBasedLimit, isQuestionInRange);
                     console.log(`[${subjectName}] After quota enforcement: ${enforcedSubjectQuestions.length} questions (limit: ${rangeBasedLimit})`);
 
-                    const needsTopicClassification = enforcedSubjectQuestions.some(q => !q.topicCategory || q.topicCategory === '기타');
-                    let finalizedSubjectQuestions = enforcedSubjectQuestions;
-                    if (needsTopicClassification && enforcedSubjectQuestions.length > 0) {
-                        const previousStatus = statusMessageRef.current;
-                        setStatusMessage(`${subjectName} 토픽 분류 중 (${enforcedSubjectQuestions.length}문항)...`);
-                        try {
-                            const classificationResults = await batchClassifyTopics(enforcedSubjectQuestions);
-                            classificationResults.forEach((classified, idx) => {
-                                if (!classified) return;
-                                finalizedSubjectQuestions[idx].topicCategory = classified.topicCategory ?? finalizedSubjectQuestions[idx].topicCategory;
-                                finalizedSubjectQuestions[idx].topicKeywords = classified.topicKeywords?.length ? classified.topicKeywords : finalizedSubjectQuestions[idx].topicKeywords;
-                                finalizedSubjectQuestions[idx].difficultyLevel = classified.difficultyLevel ?? finalizedSubjectQuestions[idx].difficultyLevel;
-                            });
-                        } catch (classificationError) {
-                            console.error('Topic classification fallback failed', classificationError);
-                        } finally {
-                            setStatusMessage(previousStatus);
-                        }
-                    }
+                    const finalizedSubjectQuestions = enforcedSubjectQuestions;
 
                     const subjectStartIndex = allQuestions.length;
 
@@ -1075,6 +1329,73 @@ export const useAiProcessing = ({
         };
     }, [certification, selectedSubject]);
 
+    const processMetadataQueue = useCallback(async () => {
+        while (componentActiveRef.current && metadataQueueRef.current.length > 0) {
+            const batch = metadataQueueRef.current.splice(0, BACKGROUND_METADATA_BATCH_SIZE);
+            try {
+                const classifiedBatch = await batchClassifyTopics(batch.map(job => job.question));
+                for (let idx = 0; idx < batch.length; idx++) {
+                    const job = batch[idx];
+                    const classifiedQuestion = classifiedBatch[idx] || job.question;
+                    const questionForDetails: QuestionModel = {
+                        ...job.question,
+                        ...classifiedQuestion
+                    };
+
+                    let detailResult = {
+                        aiExplanation: questionForDetails.aiExplanation ?? '',
+                        hint: questionForDetails.hint ?? '',
+                        rationale: questionForDetails.rationale ?? ''
+                    };
+
+                    try {
+                        detailResult = await generateQuestionDetails(questionForDetails);
+                    } catch (detailError) {
+                        console.error('Background detail generation failed', detailError);
+                    }
+
+                    const updates = {
+                        topic_category: classifiedQuestion.topicCategory ?? job.question.topicCategory ?? '기타',
+                        topic_keywords: classifiedQuestion.topicKeywords ?? job.question.topicKeywords ?? [],
+                        difficulty_level: classifiedQuestion.difficultyLevel ?? job.question.difficultyLevel ?? null,
+                        ai_explanation: detailResult.aiExplanation,
+                        hint: detailResult.hint,
+                        rationale: detailResult.rationale
+                    };
+
+                    const { error: updateError } = await supabase
+                        .from('questions')
+                        .update(updates)
+                        .eq('id', job.questionId);
+
+                    if (updateError) {
+                        console.error('Failed to update metadata for question', job.questionId, updateError);
+                    }
+
+                    await sleep(BACKGROUND_DETAIL_DELAY_MS);
+                }
+            } catch (err) {
+                console.error('Background metadata batch failed', err);
+            }
+
+            await sleep(BACKGROUND_METADATA_DELAY_MS);
+        }
+
+        metadataWorkerActiveRef.current = false;
+    }, []);
+
+    const startMetadataWorker = useCallback(() => {
+        if (metadataWorkerActiveRef.current) return;
+        metadataWorkerActiveRef.current = true;
+        void processMetadataQueue();
+    }, [processMetadataQueue]);
+
+    const enqueueMetadataJobs = useCallback((jobs: MetadataJob[]) => {
+        if (!jobs.length) return;
+        metadataQueueRef.current.push(...jobs);
+        startMetadataWorker();
+    }, [startMetadataWorker]);
+
 
     // Save Logic
     const handleSaveCurrentSubject = async () => {
@@ -1117,6 +1438,7 @@ export const useAiProcessing = ({
             // ... Similar logic for Diagrams ...
 
             const diagramUrlMap = new Map<number, string>();
+            const metadataJobs: MetadataJob[] = [];
             // Diagram upload logic would go here.
 
             for (let i = 0; i < questions.length; i++) {
@@ -1128,8 +1450,31 @@ export const useAiProcessing = ({
                     year: resolvedYear,
                     // imageUrl, diagramUrl
                 });
-                const { error: saveError } = await supabase.from('questions').insert(questionToSave);
+                const { data: insertedRow, error: saveError } = await supabase
+                    .from('questions')
+                    .insert(questionToSave)
+                    .select('id')
+                    .single();
                 if (saveError) throw saveError;
+                if (insertedRow?.id) {
+                    metadataJobs.push({
+                        questionId: insertedRow.id,
+                        question: {
+                            ...questions[i],
+                            subject: questionToSave.subject ?? questions[i].subject,
+                            year: questionToSave.year ?? resolvedYear,
+                            questionText: questionToSave.question_text,
+                            options: questionToSave.options,
+                            answerIndex: questionToSave.answer_index,
+                            aiExplanation: questionToSave.ai_explanation ?? questions[i].aiExplanation ?? '',
+                            hint: questionToSave.hint ?? questions[i].hint ?? '',
+                            rationale: questionToSave.rationale ?? questions[i].rationale ?? '',
+                            topicCategory: questionToSave.topic_category ?? questions[i].topicCategory,
+                            topicKeywords: questionToSave.topic_keywords ?? questions[i].topicKeywords,
+                            difficultyLevel: questionToSave.difficulty_level ?? questions[i].difficultyLevel
+                        }
+                    });
+                }
             }
 
             setStatusMessage(`${subjectName} 저장 완료!`);
@@ -1140,6 +1485,8 @@ export const useAiProcessing = ({
             if (!selectedSubject) {
                 setSubjectRanges(createDefaultSubjectRanges(certification));
             }
+
+            enqueueMetadataJobs(metadataJobs);
         } catch (error: any) {
             console.error(error);
             setError(`저장 실패: ${error.message}`);
@@ -1193,6 +1540,7 @@ export const useAiProcessing = ({
 
         // Results
         extractedQuestions,
+        updateExtractedQuestion,
         generatedVariants,
         previewImages,
 
@@ -1210,6 +1558,8 @@ export const useAiProcessing = ({
         openDiagramReview,
         closeDiagramReview,
         applyDiagramReview,
+        isManualReviewOpen,
+        setIsManualReviewOpen,
 
         // Ranges
         subjectRanges,

@@ -18,21 +18,30 @@ const fileToGenerativePart = async (file: File) => {
 };
 
 const unwrapFunctionResponse = <T>(data: any, error: any, defaultMessage: string): T => {
+    // 1. Handle HTTP/Invocation level errors from Supabase client
     if (error) {
         const message = (error as any)?.message || (error as any)?.error || defaultMessage;
         throw new Error(message);
     }
+
+    // 2. Handle Logic level errors from our Edge Function
     if (data && typeof data === 'object' && 'ok' in data) {
-        if (!(data as any).ok) {
-            const message = (data as any)?.error || defaultMessage;
-            throw new Error(message);
+        if (!data.ok) {
+            const serverError = data.error || defaultMessage;
+            const stack = data.stack ? `\nServer Stack: ${data.stack}` : '';
+            console.error(`Edge Function Logic Error: ${serverError}${stack}`);
+            throw new Error(serverError);
         }
-        const payload = (data as any).data;
+
+        // Success case with 'ok' flag
+        const payload = data.data;
         if (payload === undefined || payload === null) {
             throw new Error(defaultMessage);
         }
         return payload as T;
     }
+
+    // 3. Fallback for old/direct responses
     if (data === undefined || data === null) {
         throw new Error(defaultMessage);
     }
@@ -287,6 +296,8 @@ export const generateVariantQuestion = async (question: QuestionModel): Promise<
 };
 
 export const analyzeQuestionsFromText = async (text: string): Promise<QuestionModel[]> => {
+    const startedAt = Date.now();
+    const textLength = text.length;
     const schema = {
         type: "ARRAY",
         items: {
@@ -310,21 +321,27 @@ export const analyzeQuestionsFromText = async (text: string): Promise<QuestionMo
         Extract multiple-choice questions from the provided text of an Electrical Engineer Certification Exam.
         
         **Instructions:**
-        1. Identify individual questions.
-        2. Extract the subject (e.g., 'Electric Circuits', 'Electromagnetics', etc.) based on the content.
-        3. Extract the question text, options, and correct answer.
-        4. If the correct answer is not explicitly marked, solve the question to find the correct answer index (0-3).
-        5. Provide a brief explanation.
-        6. **Hint**: Provide a short hint for solving the problem (optional).
-        7. **Rationale**: Provide a detailed explanation of why the answer is correct and others are wrong.
-        8. Set 'year' to the current year if not found in text.
-        9. Return a JSON array of QuestionModel objects.
+        1. **Language**: ALL output MUST be in KOREAN.
+        2. Identify individual questions.
+        3. Extract the subject (e.g., 'Electric Circuits', 'Electromagnetics', etc.) based on the content.
+        4. Extract the question text, options, and correct answer.
+           - **CRITICAL**: Preserve the original leading question number exactly as it appears (e.g., "2. 포소화약제…"). 
+             Do NOT renumber, remove, or renumber sequentially. If the source already includes a number prefix, keep it verbatim.
+           - **LaTeX**: If the original text contains LaTeX, keep it in both the question text and the options.
+             Always preserve $...$ delimiters in options as well.
+        5. If the correct answer is not explicitly marked, solve the question to find the correct answer index (0-3).
+        6. Provide a brief explanation.
+        7. **Hint**: Provide a short hint for solving the problem (optional).
+        8. **Rationale**: Provide a detailed explanation of why the answer is correct and others are wrong.
+        9. Set 'year' to the current year if not found in text.
+        10. Return a JSON array of QuestionModel objects.
         
         **Text to Analyze:**
         ${text.substring(0, 30000)} 
     `;
 
     try {
+        console.log(`[geminiService] analyzeQuestionsFromText: length=${textLength}`);
         const { data, error } = await supabase.functions.invoke('gemini-proxy', {
             body: {
                 action: 'generateContent',
@@ -338,6 +355,9 @@ export const analyzeQuestionsFromText = async (text: string): Promise<QuestionMo
     } catch (error) {
         console.error("Error analyzing text:", error);
         throw new Error("Failed to extract questions from text.");
+    } finally {
+        const elapsedMs = Date.now() - startedAt;
+        console.log(`[geminiService] analyzeQuestionsFromText: completed in ${elapsedMs}ms`);
     }
 };
 
@@ -395,6 +415,7 @@ export const analyzeQuestionsFromImages = async (images: string[], subjectHint?:
                 rationale: { type: "STRING" },
                 topicCategory: { type: "STRING" },
                 topicKeywords: { type: "ARRAY", items: { type: "STRING" } },
+                needsManualDiagram: { type: "BOOLEAN" },
                 diagramBounds: {
                     type: "OBJECT",
                     properties: {
@@ -425,18 +446,18 @@ export const analyzeQuestionsFromImages = async (images: string[], subjectHint?:
         2. **Transcription**: Transcribe the question text and options EXACTLY as they appear in the image. 
            - **IMPORTANT**: Start the 'questionText' with the question number followed by a period (e.g., "1. 다음 중..."). Do not omit the number.
            - Do not summarize or paraphrase.
-        3. **Math & Formulas**: ALL mathematical formulas, symbols, and variables MUST be in LaTeX format enclosed in '$'.
-           - **CRITICAL JSON FORMATTING**: You are outputting JSON. Therefore, ALL backslashes in LaTeX must be **DOUBLE ESCAPED** (e.g., use \`\\\\frac\` instead of \`\\frac\`, \`\\\\times\` instead of \`\\times\`).
-           - Example: Write \`$ \\\\frac{\\\\partial B}{\\\\partial t} $\` (in JSON string it will look like \`"$\\\\frac{\\\\partial B}{\\\\partial t}$"\`).
-           - Do not use Unicode for math (e.g., do not use '×', '÷', 'Ω', 'π' directly). Use LaTeX (e.g., \`\\\\times\`, \`\\\\div\`, \`\\\\Omega\`, \`\\\\pi\`).
-           - Ensure fractions are properly formatted with \`\\\\frac{numerator}{denominator}\`.
-           - Options: Ensure options are also formatted with LaTeX if they contain math.
+        3. **Math & Formulas**: Transcribe mathematical formulas, symbols, and variables EXACTLY as they appear in the image using standard characters and Unicode (e.g., π, √, Ω, ±, θ, °, ∠, /, ^, _).
+           - **DO NOT** force conversion to LaTeX if the text is readable as plain text (e.g., write "(π/√2)Vm" instead of "\\frac{\pi}{\sqrt{2}}V_m").
+           - **ONLY** use LaTeX if the formula is extremely complex and cannot be represented clearly with standard characters.
+           - If using LaTeX, you MUST double-escape all backslashes (e.g., \\\\frac).
+           - Options: Ensure options also follow this "visual fidelity" rule.
          4. **Diagrams**:
             - **Trigger Condition**: Check if the question text contains keywords like "그림", "다음 그림", "아래 그림", "회로도", "결선도".
             - **Action**: IF AND ONLY IF these keywords are present OR there is a clearly visible diagram/chart/graph associated with the question:
               - Detect the bounding box coordinates of the diagram in the image.
               - Return the coordinates in 'diagramBounds' as: { x: number, y: number, width: number, height: number }
-              - Coordinates should be in pixels, relative to the top-left corner of the image (0, 0).
+              - Coordinates MUST be in **ABSOLUTE PIXELS**, relative to the top-left corner of the image (0, 0).
+              - **DO NOT** use normalized coordinates (0-1). Return integers representing pixels.
             - If NO diagram is present or keywords are missing, set 'diagramBounds' to null.
             - Also describe the diagram briefly in Korean in the 'questionText' (e.g., "[회로도: R1=10Ω 병렬 연결...]").
          5. **Subject**: Identify the subject in Korean (e.g., '전기자기학', '회로이론', '전력공학', '전기기기', '전기설비기술기준'). ${subjectHint ? `Prefer using \"${subjectHint}\" if applicable.` : ''}
@@ -546,6 +567,102 @@ export const analyzeQuestionsFromImages = async (images: string[], subjectHint?:
 };
 
 /**
+ * Analyzes a document file (like .docx) for question extraction.
+ */
+export const analyzeDocument = async (
+    file: File,
+    allowedSubjects: string[] = [],
+    subjectHint?: string,
+    questionStart?: number,
+    questionEnd?: number
+): Promise<QuestionModel[]> => {
+    const schema = {
+        type: "ARRAY",
+        items: {
+            type: "OBJECT",
+            properties: {
+                subject: { type: "STRING" },
+                questionText: { type: "STRING" },
+                options: { type: "ARRAY", items: { type: "STRING" } },
+                answerIndex: { type: "INTEGER" },
+                aiExplanation: { type: "STRING" },
+                hint: { type: "STRING" },
+                rationale: { type: "STRING" },
+                topicCategory: { type: "STRING" },
+                topicKeywords: { type: "ARRAY", items: { type: "STRING" } },
+                needsManualDiagram: { type: "BOOLEAN" }
+            },
+            required: ["subject", "questionText", "options", "answerIndex", "aiExplanation"]
+        }
+    };
+
+    const prompt = `
+        You are an expert exam parser for Electrical Engineering in Korea.
+        ${questionStart && questionEnd ? `Analyze the provided document and extract questions numbered from ${questionStart} to ${questionEnd}.` : 'Analyze the provided document and extract ALL multiple-choice questions.'}
+        
+        **Instructions:**
+        1. **Transcription**: Transcribe the question text and options exactly.
+        2. **Language**: Output in Korean.
+        3. **Math**: Use Unicode symbols (π, √, Ω) or plain text formulas (e.g., (π/√2)Vm).
+        4. **Diagrams**: If a question contains a diagram, set 'needsManualDiagram' to true since you are analyzing a document where extraction of separate image files is not possible via precise coordinates.
+        5. **Subject**: Identify the subject. ${subjectHint ? `Prefer using \"${subjectHint}\".` : ''}
+        6. **Topic**: Choose from the list: ${JSON.stringify(SUBJECT_TOPICS)}
+        7. **Output**: Return a JSON array of QuestionModel objects.
+    `;
+
+    // Convert file to base64 for Gemini
+    const base64Data = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve((reader.result as string).split(',')[1]);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+    });
+
+    // Force standard MIME types for certain extensions to ensure Gemini compatibility.
+    let mimeType = file.type;
+    if (file.name.toLowerCase().endsWith('.docx')) {
+        mimeType = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+    } else if (file.name.toLowerCase().endsWith('.txt')) {
+        mimeType = 'text/plain';
+    }
+
+    try {
+        const { data, error } = await supabase.functions.invoke('gemini-proxy', {
+            body: {
+                action: 'analyzeImage', // Highly stable action that handles server-side cleaning & parsing
+                payload: {
+                    model: "gemini-2.5-flash",
+                    prompt,
+                    schema,
+                    imageParts: [
+                        {
+                            inlineData: {
+                                data: base64Data,
+                                mimeType: mimeType
+                            }
+                        }
+                    ]
+                }
+            }
+        });
+
+        const questions = unwrapFunctionResponse<QuestionModel[]>(data, error, 'Failed to extract questions from document.');
+
+        // Post-processing
+        return questions.map(q => {
+            let processedQ = { ...q };
+            const normalizedSubject = normalizeSubjectName(processedQ.subject, allowedSubjects, subjectHint);
+            if (normalizedSubject) processedQ.subject = normalizedSubject;
+            processedQ.topicCategory = resolveTopicCategory(processedQ, processedQ.topicCategory);
+            return processedQ;
+        });
+    } catch (error) {
+        console.error("Error analyzing document:", error);
+        throw new Error(`Failed to extract questions from document: ${error instanceof Error ? error.message : String(error)}`);
+    }
+};
+
+/**
  * Determines the subject based on the question number.
  */
 function determineSubjectByNumber(number: number): string | null {
@@ -622,7 +739,9 @@ export const generateFiveVariants = async (originalQuestion: QuestionModel, exam
             year: originalQuestion.year,
             isVariant: true,
             parentQuestionId: originalQuestion.id,
-            certification: originalQuestion.certification
+            certification: originalQuestion.certification,
+            topicCategory: originalQuestion.topicCategory,
+            topicKeywords: originalQuestion.topicKeywords
         }));
     } catch (error) {
         console.error("Error generating 5 variants:", error);
@@ -721,7 +840,7 @@ export async function classifyQuestionTopic(
     }
 }
 
-const TOPIC_CLASSIFICATION_TIMEOUT_MS = 15000;
+const TOPIC_CLASSIFICATION_TIMEOUT_MS = 30000;
 const TOPIC_CLASSIFICATION_CONCURRENCY = 3;
 
 type TopicClassificationResult = Awaited<ReturnType<typeof classifyQuestionTopic>>;
@@ -769,7 +888,7 @@ export async function batchClassifyTopics(
                     ...result.value,
                 });
             } else {
-                console.error(`Failed to classify question ${question.id}:`, result.reason);
+                console.error(`Failed to classify question "${question.questionText?.slice(0, 50)}...":`, result.reason);
                 classified.push({
                     ...question,
                     topicCategory: resolveTopicCategory(question),
@@ -783,6 +902,59 @@ export async function batchClassifyTopics(
     console.log(`Topic classification complete! ${classified.length} questions classified.`);
     return classified;
 }
+
+export const generateQuestionDetails = async (
+    question: QuestionModel
+): Promise<Pick<QuestionModel, 'aiExplanation' | 'hint' | 'rationale'>> => {
+    const schema = {
+        type: "OBJECT",
+        properties: {
+            aiExplanation: { type: "STRING" },
+            hint: { type: "STRING" },
+            rationale: { type: "STRING" }
+        },
+        required: ["aiExplanation", "hint", "rationale"]
+    };
+
+    const prompt = `
+당신은 전기기사 시험 전문 AI 튜터입니다.
+다음 문제에 대해 해설, 힌트, 정답 근거를 작성하세요.
+1. 해설(aiExplanation): 정답을 구하는 단계와 핵심 개념을 자세히 설명
+2. 힌트(hint): 수험생이 풀이를 떠올릴 수 있도록 간단한 방향 제시
+3. 근거(rationale): 정답이 맞는 이유와 오답이 틀린 이유를 짧게 정리
+
+과목: ${question.subject || '미지정'}
+문항: ${question.questionText}
+보기: ${Array.isArray(question.options) ? question.options.join(' / ') : '보기 없음'}
+정답 인덱스: ${typeof question.answerIndex === 'number' ? question.answerIndex : '미지정'}
+`;
+
+    try {
+        const { data, error } = await supabase.functions.invoke('gemini-proxy', {
+            body: {
+                action: 'generateContent',
+                payload: {
+                    model: 'gemini-2.5-flash',
+                    prompt,
+                    schema
+                }
+            }
+        });
+
+        return unwrapFunctionResponse<{ aiExplanation: string; hint: string; rationale: string }>(
+            data,
+            error,
+            'Failed to generate question details.'
+        );
+    } catch (err) {
+        console.error('generateQuestionDetails error:', err);
+        return {
+            aiExplanation: question.aiExplanation ?? '',
+            hint: question.hint ?? '',
+            rationale: question.rationale ?? ''
+        };
+    }
+};
 
 export const extractTextFromImages = async (images: string[]): Promise<string> => {
     const prompt = `

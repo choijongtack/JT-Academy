@@ -4,7 +4,9 @@ import {
   WrongAnswerModel,
   LearningProgress,
   CertificationStandard,
-  SaveCertificationStandardInput
+  SaveCertificationStandardInput,
+  StudyPlan,
+  DailyStudyLog
 } from '../types';
 import { supabase } from './supabaseClient';
 import { wrongAnswerService } from './wrongAnswerService';
@@ -75,6 +77,103 @@ const mapCertificationStandard = (item: any): CertificationStandard => {
 };
 
 export const quizApi = {
+  loadQuestionsPaged: async ({
+    subject,
+    year,
+    topic,
+    certification,
+    search,
+    page = 1,
+    pageSize = 20
+  }: {
+    subject?: string;
+    year?: number;
+    topic?: string;
+    certification?: string;
+    search?: string;
+    page?: number;
+    pageSize?: number;
+  }): Promise<{ questions: QuestionModel[]; count: number }> => {
+    const buildQuery = (includeCertification: boolean) => {
+      let query = supabase.from('questions').select('*', { count: 'exact' });
+      if (subject) {
+        query = query.eq('subject', subject);
+      }
+      if (year) {
+        query = query.eq('year', year);
+      }
+      if (topic) {
+        if (topic === '기타' && subject && SUBJECT_TOPICS[subject]) {
+          query = query.not('topic_category', 'in', `(${SUBJECT_TOPICS[subject].map(t => `"${t}"`).join(',')})`);
+        } else {
+          query = query.eq('topic_category', topic);
+        }
+      }
+      if (search) {
+        const trimmed = search.trim();
+        if (trimmed) {
+          const numeric = Number(trimmed);
+          if (!Number.isNaN(numeric)) {
+            query = query.or(`question_text.ilike.%${trimmed}%,id.eq.${numeric}`);
+          } else {
+            query = query.or(`question_text.ilike.%${trimmed}%`);
+          }
+        }
+      }
+      if (includeCertification && certification) {
+        query = query.eq('certification', certification);
+      }
+      return query.order('created_at', { ascending: false });
+    };
+
+    const from = (page - 1) * pageSize;
+    const to = from + pageSize - 1;
+
+    let usedFallback = false;
+    let { data, count, error } = await buildQuery(true).range(from, to);
+
+    if (!error && certification && (!data || data.length === 0)) {
+      console.warn(`[quizApi] loadQuestionsPaged: No questions for subject='${subject}' certification='${certification}'. Falling back to subject-only query.`);
+      usedFallback = true;
+      const fallbackResult = await buildQuery(false).range(from, to);
+      data = fallbackResult.data;
+      count = fallbackResult.count;
+      error = fallbackResult.error;
+    }
+
+    if (error) {
+      console.error('Error loading paged questions:', error);
+      return { questions: [], count: 0 };
+    }
+
+    const safeData = data || [];
+    console.log(`[quizApi] loadQuestionsPaged: Fetched ${safeData.length} questions. Subject: ${subject || 'ALL'}, Certification: ${usedFallback ? 'ALL (fallback)' : certification || 'ALL'}`);
+
+    return {
+      questions: safeData.map(item => ({
+        id: item.id,
+        subject: item.subject,
+        year: item.year,
+        questionText: item.question_text,
+        options: item.options,
+        answerIndex: normalizeAnswerIndex(item.answer_index),
+        aiExplanation: item.ai_explanation,
+        isVariant: item.is_variant,
+        parentQuestionId: item.parent_question_id,
+        hint: item.hint,
+        rationale: item.rationale,
+        topicCategory: item.topic_category,
+        topicKeywords: item.topic_keywords,
+        frequency: item.frequency,
+        difficultyLevel: item.difficulty_level,
+        imageUrl: item.image_url,
+        textFileUrl: item.text_file_url,
+        diagramUrl: item.diagram_url,
+        certification: item.certification
+      })),
+      count: count ?? 0
+    };
+  },
   loadQuestions: async ({ subject, year, topic, certification }: { subject?: string; year?: number; topic?: string; certification?: string }): Promise<QuestionModel[]> => {
     const buildQuery = (includeCertification: boolean) => {
       let query = supabase.from('questions').select('*');
@@ -294,9 +393,7 @@ export const quizApi = {
     const topicMap = new Map<string, import('../types').TopicStats>();
 
     questions.forEach(q => {
-      if (!q.topicCategory) return;
-
-      const key = q.topicCategory;
+      const key = q.topicCategory || '기타';
 
       if (topicMap.has(key)) {
         const stats = topicMap.get(key)!;
@@ -307,7 +404,7 @@ export const quizApi = {
       } else {
         topicMap.set(key, {
           subject: q.subject,
-          topicCategory: q.topicCategory,
+          topicCategory: key,
           questionCount: 1,
           years: [q.year],
         });
@@ -490,14 +587,18 @@ export const quizApi = {
   },
 
   getLearningProgress: async (userId: string, certification?: string): Promise<LearningProgress> => {
-    const allQuestions = await quizApi.getAllQuestions();
+    // If certification is provided, fetch only relevant questions to avoid hitting global limits (e.g. 1000 row default)
+    const relevantQuestions = certification
+      ? await quizApi.loadQuestions({ certification })
+      : await quizApi.getAllQuestions();
+
     const allRecords = await quizApi.getAllRecords(userId);
     const wrongAnswers = await quizApi.getWrongAnswers(userId);
 
-    // Filter questions by certification if provided
-    const relevantQuestions = certification
-      ? allQuestions.filter(q => q.certification === certification)
-      : allQuestions;
+    // If certification was NOT provided originally, relevantQuestions is allQuestions, so no filtering needed here.
+    // However, if we want to be safe and consistent with the previous logic:
+    // (though the above already handles the certification filtering at the DB level)
+    // we just use relevantQuestions directly as the base.
 
     const relevantQuestionIds = new Set(relevantQuestions.map(q => q.id));
 
@@ -970,7 +1071,7 @@ export const quizApi = {
 
   // Study Plan Functions
 
-  createStudyPlan: async (userId: string, courseType: '60_day' | '90_day', certification: string): Promise<import('../types').StudyPlan> => {
+  createStudyPlan: async (userId: string, courseType: '60_day' | '90_day', certification: string): Promise<StudyPlan> => {
     // Check if active plan exists
 
 
@@ -1008,7 +1109,7 @@ export const quizApi = {
     };
   },
 
-  getActiveStudyPlan: async (userId: string, certification: string): Promise<import('../types').StudyPlan | null> => {
+  getActiveStudyPlan: async (userId: string, certification: string): Promise<StudyPlan | null> => {
     const { data, error } = await supabase
       .from('study_plans')
       .select('*')
@@ -1032,7 +1133,7 @@ export const quizApi = {
     };
   },
 
-  getDailyRoutine: async (planId: string, dayNumber: number): Promise<import('../types').DailyStudyLog | null> => {
+  getDailyRoutine: async (planId: string, dayNumber: number): Promise<DailyStudyLog | null> => {
     const { data, error } = await supabase
       .from('daily_study_logs')
       .select('*')
@@ -1053,7 +1154,7 @@ export const quizApi = {
     };
   },
 
-  startDailyRoutine: async (planId: string, dayNumber: number, subjects: string[]): Promise<import('../types').DailyStudyLog> => {
+  startDailyRoutine: async (planId: string, dayNumber: number, subjects: string[]): Promise<DailyStudyLog> => {
     // Check if exists
     const existing = await quizApi.getDailyRoutine(planId, dayNumber);
     if (existing) return existing;
