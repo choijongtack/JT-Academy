@@ -1,6 +1,6 @@
 // components/QuizScreen.tsx
 
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 // NOTE: 실제 프로젝트의 타입 정의에 맞게 QuestionModel, AuthSession 등을 조정해야 합니다.
 import { QuestionModel, AuthSession } from '../types';
 import { quizApi } from '../services/quizApi';
@@ -26,6 +26,13 @@ interface QuizScreenProps {
   examDuration?: number; // Duration in minutes for timed exams (e.g., 150 for mock test)
   isPhase1?: boolean;
   onPhase1Complete?: (payload: Phase1CompletePayload) => void;
+  routineTask?: {
+    planId: string;
+    logId: string;
+    type: 'reading' | 'review';
+    completedQuestionIds: number[];
+    totalTargetCount: number;
+  };
 }
 
 const HINT_FORBIDDEN_PATTERNS: RegExp[] = [
@@ -69,7 +76,7 @@ const sanitizeHintText = (text?: string | null): string => {
   return filtered.join('\n').trim();
 };
 
-const QuizScreen: React.FC<QuizScreenProps> = ({ questions, onFinish, title, session, onStartVariantQuiz, initialSolvedRecords, examDuration, isPhase1 = false, onPhase1Complete }) => {
+const QuizScreen: React.FC<QuizScreenProps> = ({ questions, onFinish, title, session, onStartVariantQuiz, initialSolvedRecords, examDuration, isPhase1 = false, onPhase1Complete, routineTask }) => {
   // ----------------------------------------------------
   // 1. 상태 관리
   // ----------------------------------------------------
@@ -84,6 +91,9 @@ const QuizScreen: React.FC<QuizScreenProps> = ({ questions, onFinish, title, ses
   const [variantError, setVariantError] = useState<string | null>(null);
   const [showHint, setShowHint] = useState(false);
   const [isChatOpen, setIsChatOpen] = useState(false);
+  const [routineCompletedCount, setRoutineCompletedCount] = useState(0);
+  const routineCompletedIdsRef = useRef<Set<number>>(new Set());
+  const routineCompletionSentRef = useRef(false);
 
   // Timer state (only for timed exams like mock tests)
   const [timeRemaining, setTimeRemaining] = useState<number | null>(
@@ -111,6 +121,18 @@ const QuizScreen: React.FC<QuizScreenProps> = ({ questions, onFinish, title, ses
     // If all solved, start at 0. If some solved, start at first unsolved.
     setCurrentQuestionIndex(firstUnsolvedIndex === -1 ? 0 : firstUnsolvedIndex);
   }, [questions, initialSolvedRecords]);
+
+  useEffect(() => {
+    if (!routineTask) {
+      routineCompletedIdsRef.current = new Set();
+      routineCompletionSentRef.current = false;
+      setRoutineCompletedCount(0);
+      return;
+    }
+    routineCompletedIdsRef.current = new Set(routineTask.completedQuestionIds || []);
+    routineCompletionSentRef.current = false;
+    setRoutineCompletedCount(routineTask.completedQuestionIds?.length || 0);
+  }, [routineTask?.logId, routineTask?.type]);
 
   useEffect(() => {
     // 문제 인덱스가 변경될 때 상태 재설정
@@ -202,6 +224,25 @@ const QuizScreen: React.FC<QuizScreenProps> = ({ questions, onFinish, title, ses
       userAnswerIndex: answerIndex,
       isCorrect: answerIndex === correctAnswerIndex,
     }, session.user.id);
+
+    if (routineTask) {
+      const completedIds = routineCompletedIdsRef.current;
+      if (!completedIds.has(currentQuestion.id)) {
+        completedIds.add(currentQuestion.id);
+        const updatedIds = Array.from(completedIds);
+        setRoutineCompletedCount(updatedIds.length);
+        quizApi.updateDailyQuestionIds(routineTask.logId, routineTask.type, updatedIds)
+          .catch(error => console.error('Failed to update daily question ids:', error));
+
+        if (!routineCompletionSentRef.current && updatedIds.length >= routineTask.totalTargetCount) {
+          routineCompletionSentRef.current = true;
+          quizApi.updateDailyProgress(routineTask.logId, {
+            reading: routineTask.type === 'reading' ? true : undefined,
+            review: routineTask.type === 'review' ? true : undefined
+          }).catch(error => console.error('Failed to update daily progress:', error));
+        }
+      }
+    }
 
     if (isPhase1 && defaultExplanation) {
       setShowHint(true);
@@ -333,6 +374,10 @@ const QuizScreen: React.FC<QuizScreenProps> = ({ questions, onFinish, title, ses
   };
 
   const isQuestionAnswered = useMemo(() => isAnswerChecked || sessionAnswers[currentQuestionIndex] !== undefined, [isAnswerChecked, currentQuestionIndex, sessionAnswers]);
+  const routineOffset = routineTask ? routineCompletedCount : 0;
+  const progressTotalCount = routineTask?.totalTargetCount ?? questions.length;
+  const progressIndex = Math.min(progressTotalCount - 1, routineOffset + currentQuestionIndex);
+  const progressDisplayIndex = Math.min(progressTotalCount, routineOffset + currentQuestionIndex + 1);
 
   // ----------------------------------------------------
   // 5. 렌더링
@@ -349,11 +394,11 @@ const QuizScreen: React.FC<QuizScreenProps> = ({ questions, onFinish, title, ses
       <div className="mb-8">
         <div className="overflow-x-auto mb-2">
           <div className="flex gap-1 min-w-full">
-            {questions.map((_, idx) => (
+            {Array.from({ length: progressTotalCount }).map((_, idx) => (
               <div
                 key={idx}
-                className={`h-1.5 flex-1 min-w-[4px] rounded-full transition-colors ${idx < currentQuestionIndex ? 'bg-yellow-400' :
-                  idx === currentQuestionIndex ? 'bg-blue-600' : 'bg-slate-200 dark:bg-slate-700'
+                className={`h-1.5 flex-1 min-w-[4px] rounded-full transition-colors ${idx < progressIndex ? 'bg-yellow-400' :
+                  idx === progressIndex ? 'bg-blue-600' : 'bg-slate-200 dark:bg-slate-700'
                   }`}
               />
             ))}
@@ -378,7 +423,7 @@ const QuizScreen: React.FC<QuizScreenProps> = ({ questions, onFinish, title, ses
         )}
 
         <div className="flex justify-end items-center gap-3 text-sm font-medium">
-          <span className="text-slate-500 dark:text-slate-400">{currentQuestionIndex + 1} / {questions.length}</span>
+          <span className="text-slate-500 dark:text-slate-400">{progressDisplayIndex} / {progressTotalCount}</span>
           <div className="flex items-center gap-2">
             <span className="px-2 py-0.5 bg-red-100 text-red-600 rounded text-xs font-bold">
               ✕ {wrongCount}

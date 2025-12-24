@@ -56,6 +56,17 @@ const parseAssistantMessage = (text: string): ParsedSection[] | null => {
   return sections.length > 0 ? sections : null;
 };
 
+const shouldRequestContinuation = (text: string): boolean => {
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  if (/[.!?…)"'\]]$/.test(trimmed)) return false;
+  if (/[,:;(\-–—]$/.test(trimmed)) return true;
+  if (/(은|는|이|가|을|를|에|와|과|로|도|만|에서|까지|부터|보다|처럼|만큼|에게|께|한테|랑|이나|든)$/.test(trimmed)) {
+    return true;
+  }
+  return false;
+};
+
 const renderAssistantContent = (content: string) => {
   const sections = parseAssistantMessage(content);
   if (!sections) {
@@ -150,7 +161,28 @@ const AIExplanationChat: React.FC<AIExplanationChatProps> = ({ question, isOpen,
     setError(null);
     try {
       const reply = await sendExplanationFollowUpMessage(question, history);
-      const assistantMessage: ExplanationChatMessage = { role: 'assistant', content: reply };
+      let combinedReply = reply;
+      let continuationHistory = [...history, { role: 'assistant', content: reply }];
+      let continuationCount = 0;
+
+      while (shouldRequestContinuation(combinedReply) && continuationCount < 5) {
+        const continuationPrompt: ExplanationChatMessage = {
+          role: 'user',
+          content: '이어서 계속 설명해줘. 앞에서 끊긴 부분부터.'
+        };
+        const continuationReply = await sendExplanationFollowUpMessage(
+          question,
+          [...continuationHistory, continuationPrompt]
+        );
+        if (!continuationReply.trim()) {
+          break;
+        }
+        combinedReply = `${combinedReply.trim()}\n${continuationReply.trim()}`;
+        continuationHistory = [...continuationHistory, continuationPrompt, { role: 'assistant', content: continuationReply }];
+        continuationCount += 1;
+      }
+
+      const assistantMessage: ExplanationChatMessage = { role: 'assistant', content: combinedReply };
       const updatedHistory = [...history, assistantMessage];
       setMessages(updatedHistory);
       latestMessages.current = updatedHistory;

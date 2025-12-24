@@ -24,13 +24,15 @@ const Latex: React.FC<{ latex: string; displayMode?: boolean }> = ({ latex, disp
                     // Fix: Ensure \mathbf is used correctly
                     .replace(/\\mathbf\{([^}]+)\}/g, '\\mathbf{$1}');
 
-                console.log('🔍 LaTeX Debug:');
-                console.log('  Original:', latex);
-                console.log('  Processed:', processedLatex);
+                if (import.meta.env.DEV) {
+                    console.log('?? LaTeX Debug:');
+                    console.log('  Original:', latex);
+                    console.log('  Processed:', processedLatex);
+                }
 
-                // KaTeX 라이브러리를 사용하여 LaTeX 문자열을 HTML로 변환하여 DOM에 삽입
+                // KaTeX ?????? ???? LaTeX ??? HTML? ??? DOM? ??
                 katex.render(processedLatex, containerRef.current, {
-                    throwOnError: false, // 에러 발생 시 앱 중단 방지
+                    throwOnError: false, // ?? ?? ? ?? ??
                     displayMode: displayMode,
                 });
 
@@ -38,27 +40,31 @@ const Latex: React.FC<{ latex: string; displayMode?: boolean }> = ({ latex, disp
                 const katexElement = containerRef.current.querySelector('.katex');
                 if (katexElement) {
                     const computedStyle = window.getComputedStyle(katexElement);
-                    console.log('✅ LaTeX rendered successfully');
-                    console.log('  KaTeX element found:', katexElement.className);
-                    console.log('  Font family:', computedStyle.fontFamily);
-                    console.log('  HTML output:', containerRef.current.innerHTML.substring(0, 200));
-                    console.log('  Display:', computedStyle.display);
-                    console.log('  Visibility:', computedStyle.visibility);
+                    if (import.meta.env.DEV) {
+                        console.log('? LaTeX rendered successfully');
+                        console.log('  KaTeX element found:', katexElement.className);
+                        console.log('  Font family:', computedStyle.fontFamily);
+                        console.log('  HTML output:', containerRef.current.innerHTML.substring(0, 200));
+                        console.log('  Display:', computedStyle.display);
+                        console.log('  Visibility:', computedStyle.visibility);
 
-                    if (computedStyle.fontFamily.includes('KaTeX')) {
-                        console.log('  ✅ KaTeX CSS is loaded!');
-                    } else {
-                        console.error('  ❌ KaTeX CSS NOT loaded! Font:', computedStyle.fontFamily);
-                        console.error('  → Check if katex.min.css is loading in Network tab');
+                        if (computedStyle.fontFamily.includes('KaTeX')) {
+                            console.log('  ? KaTeX CSS is loaded!');
+                        } else {
+                            console.error('  ? KaTeX CSS NOT loaded! Font:', computedStyle.fontFamily);
+                            console.error('  ? Check if katex.min.css is loading in Network tab');
+                        }
                     }
-                } else {
-                    console.warn('  ⚠️ No .katex element found in rendered output');
+                } else if (import.meta.env.DEV) {
+                    console.warn('?? No .katex element found in rendered output');
                     console.warn('  Container HTML:', containerRef.current.innerHTML);
                 }
             } catch (e) {
-                console.error('❌ KaTeX rendering error:');
-                console.error('  Input:', latex);
-                console.error('  Error:', e);
+                if (import.meta.env.DEV) {
+                    console.error('? KaTeX rendering error:');
+                    console.error('  Input:', latex);
+                    console.error('  Error:', e);
+                }
                 // 렌더링 실패 시 원본 코드를 Fallback으로 표시
                 containerRef.current.textContent = displayMode ? `$$${latex}$$` : `$${latex}$`;
             }
@@ -91,13 +97,19 @@ const FormattedText: React.FC<FormattedTextProps> = memo(({ text }) => {
     const hasLatexCommands = /\\(frac|partial|sqrt|times|pm|theta|pi|infty|int|sum|lim|alpha|beta|omega|Omega|mu|epsilon|lambda|sigma|rho|phi|cdot|approx|neq|le|ge|nabla|text|overline)/.test(normalizedText);
     const hasDelimiters = /\$\$|\$/.test(normalizedText);
 
-    let finalText = normalizedText;
-    // 명령어가 있지만 구분자($$)가 없으면 자동으로 $$로 감싸줌 (AI 데이터 처리 용이)
-    if (hasLatexCommands && !hasDelimiters) {
-        finalText = `$$${normalizedText}$$`;
-    }
+    const wrapLooseLatex = (input: string) => {
+        if (!hasLatexCommands || hasDelimiters) {
+            return input;
+        }
+        return input.replace(/\\[a-zA-Z]+(?:\{[^}]*\})?(?:[\\^_{}()=+\-*/.,0-9A-Za-z\s]|\\[a-zA-Z]+)*/g, (match) => {
+            const trimmed = match.trim();
+            if (!trimmed) return match;
+            return `$${trimmed}$`;
+        });
+    };
 
-    // 텍스트를 LaTeX 구분자($$...$$ 또는 $...$)를 기준으로 분할
+    const finalText = wrapLooseLatex(normalizedText);
+
     const parts = finalText.split(/(\$\$[\s\S]*?\$\$|\$[^$]*?\$)/g);
 
     return (

@@ -35,6 +35,14 @@ type Phase1ResultPayload = {
   timestamp: string;
 };
 
+type RoutineTask = {
+  planId: string;
+  logId: string;
+  type: 'reading' | 'review';
+  completedQuestionIds: number[];
+  totalTargetCount: number;
+};
+
 
 const App: React.FC = () => {
   const [session, setSession] = useState<AuthSession | null>(null);
@@ -52,6 +60,7 @@ const App: React.FC = () => {
   const [authMode, setAuthMode] = useState<'login' | 'signup'>('login');
   const [phaseStatuses, setPhaseStatuses] = useState<Record<string, SubjectPhaseStatus>>({});
   const [phaseStatusReady, setPhaseStatusReady] = useState(false);
+  const [routineTask, setRoutineTask] = useState<RoutineTask | null>(null);
   const PHASE1_HISTORY_MAX = 5;
   const isMobile = useMediaQuery('(max-width: 768px)');
   const phaseStatusStorageKey = useMemo(() => {
@@ -153,6 +162,7 @@ const App: React.FC = () => {
     setQuizTitle("모의고사");
     setIsMockTest(true);
     setIsPhase1Mode(false);
+    setRoutineTask(null);
     const questions = await quizApi.generateMockTest(100, selectedCertification);
     setQuizQuestions(questions);
     setInitialSolvedRecords({});
@@ -164,6 +174,7 @@ const App: React.FC = () => {
     if (!session) return;
     setQuizTitle("오답노트 복습");
     setIsPhase1Mode(false);
+    setRoutineTask(null);
     const wrongAnswers = await quizApi.getWrongAnswers(session.user.id);
     const wrongQuestionIds = wrongAnswers.map(wa => wa.questionId);
 
@@ -193,6 +204,7 @@ const App: React.FC = () => {
     setQuizTitle(topic ? `${subject} - ${topic}` : subject);
     setIsMockTest(false);
     setIsPhase1Mode(false);
+    setRoutineTask(null);
 
     // Load questions
     let questions = await quizApi.loadQuestions({ subject, topic, certification: selectedCertification });
@@ -238,6 +250,7 @@ const App: React.FC = () => {
     setQuizTitle(`${subject} 기초다지기`);
     setIsMockTest(false);
     setIsPhase1Mode(true);
+    setRoutineTask(null);
 
     let history: number[][] = [];
     try {
@@ -306,6 +319,7 @@ const App: React.FC = () => {
 
   const handleStartVariantQuiz = useCallback((questions: QuestionModel[]) => {
     setIsPhase1Mode(false);
+    setRoutineTask(null);
     setQuizTitle("AI 응용 문제 풀기");
     setQuizQuestions(questions);
     setInitialSolvedRecords({});
@@ -313,8 +327,24 @@ const App: React.FC = () => {
     setCurrentScreen('quiz');
   }, []);
 
+  const handleStartRoutineQuiz = useCallback((
+    questions: QuestionModel[],
+    title: string,
+    task?: RoutineTask
+  ) => {
+    setIsMockTest(false);
+    setIsPhase1Mode(false);
+    setQuizTitle(title);
+    setQuizQuestions(questions);
+    setInitialSolvedRecords({});
+    setQuizReturnScreen('course-routine');
+    setRoutineTask(task || null);
+    setCurrentScreen('quiz');
+  }, []);
+
   const handleQuizFinish = useCallback(() => {
     setIsPhase1Mode(false);
+    setRoutineTask(null);
     navigate(quizReturnScreen);
   }, [navigate, quizReturnScreen]);
 
@@ -337,6 +367,7 @@ const App: React.FC = () => {
           examDuration={isMockTest ? 150 : undefined}
           isPhase1={isPhase1Mode}
           onPhase1Complete={handlePhase1Result}
+          routineTask={routineTask || undefined}
         />;
       case 'wrong-note':
         return <WrongNoteScreen navigate={navigate} startReview={startWrongAnswerReview} session={session} onStartVariantQuiz={handleStartVariantQuiz} />;
@@ -360,7 +391,7 @@ const App: React.FC = () => {
           onNavigate={navigate}
           session={session}
           certification={selectedCertification}
-          onStartQuiz={handleStartVariantQuiz} // Using generic quiz start handler
+          onStartQuiz={handleStartRoutineQuiz}
         />;
       case 'dashboard':
       default:
@@ -486,7 +517,7 @@ const App: React.FC = () => {
             {session.user.email}
           </span>
           {currentScreen === 'quiz' ? (
-            <button onClick={() => { setIsPhase1Mode(false); navigate(quizReturnScreen); }} className="bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-200 font-semibold py-1 px-3 rounded-md transition-colors">
+            <button onClick={() => { setIsPhase1Mode(false); setRoutineTask(null); navigate(quizReturnScreen); }} className="bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-200 font-semibold py-1 px-3 rounded-md transition-colors">
               퀴즈 종료
             </button>
           ) : currentScreen === 'subject-select' || currentScreen === 'wrong-note' || currentScreen === 'ai-variant-generator' || currentScreen === 'admin-questions' || currentScreen === 'course-routine' ? (

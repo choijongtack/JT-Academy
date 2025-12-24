@@ -4,9 +4,51 @@ import { quizApi } from '../services/quizApi';
 import { supabase } from '../services/supabaseClient';
 import FormattedText from './FormattedText';
 import { isAdmin } from '../services/authService';
-import { CERTIFICATIONS, SUBJECT_TOPICS } from '../constants';
+import { CERTIFICATIONS, CERTIFICATION_SUBJECTS, SUBJECT_TOPICS } from '../constants';
 
 const normalizeKey = (value?: string | null) => (value ?? '').replace(/\s+/g, ' ').trim();
+
+const buildSubjectOrderMap = (): Map<string, number> => {
+    const map = new Map<string, number>();
+    let index = 0;
+
+    CERTIFICATIONS.forEach(certification => {
+        const subjects = CERTIFICATION_SUBJECTS[certification] || [];
+        subjects.forEach(subject => {
+            const key = normalizeKey(subject);
+            if (!key || map.has(key)) return;
+            map.set(key, index);
+            index += 1;
+        });
+    });
+
+    return map;
+};
+
+const sortSubjectsByOrder = (subjects: string[], orderMap: Map<string, number>): string[] => {
+    return [...subjects].sort((a, b) => {
+        const aKey = normalizeKey(a);
+        const bKey = normalizeKey(b);
+        const aIndex = orderMap.get(aKey);
+        const bIndex = orderMap.get(bKey);
+
+        if (aIndex !== undefined && bIndex !== undefined) return aIndex - bIndex;
+        if (aIndex !== undefined) return -1;
+        if (bIndex !== undefined) return 1;
+        return aKey.localeCompare(bKey);
+    });
+};
+
+const buildCertificationSubjectOrderMap = (certification: string): Map<string, number> => {
+    const map = new Map<string, number>();
+    const subjects = CERTIFICATION_SUBJECTS[certification as keyof typeof CERTIFICATION_SUBJECTS] || [];
+    subjects.forEach((subject, index) => {
+        const key = normalizeKey(subject);
+        if (!key) return;
+        map.set(key, index);
+    });
+    return map;
+};
 
 const normalizeSubjectValue = (subject?: string | null): string => {
     const trimmed = normalizeKey(subject);
@@ -188,8 +230,10 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
             offset += batchSize;
         }
 
+        const globalSubjectOrderMap = buildSubjectOrderMap();
+
         setAvailableYears(Array.from(years).sort((a, b) => b - a));
-        setAvailableSubjects(Array.from(subjects).sort((a, b) => a.localeCompare(b)));
+        setAvailableSubjects(sortSubjectsByOrder(Array.from(subjects), globalSubjectOrderMap));
         setAvailableCertifications(Array.from(certifications).sort((a, b) => a.localeCompare(b)));
 
         const topicsRecord: Record<string, string[]> = {};
@@ -200,7 +244,8 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
 
         const subjectsByCertRecord: Record<string, string[]> = {};
         subjectsByCert.forEach((subjectSet, cert) => {
-            subjectsByCertRecord[cert] = Array.from(subjectSet).sort((a, b) => a.localeCompare(b));
+            const certOrderMap = buildCertificationSubjectOrderMap(cert);
+            subjectsByCertRecord[cert] = sortSubjectsByOrder(Array.from(subjectSet), certOrderMap);
         });
         setSubjectsByCertification(subjectsByCertRecord);
 

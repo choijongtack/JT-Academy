@@ -7,7 +7,17 @@ interface CourseRoutineScreenProps {
     session: AuthSession;
     plan?: StudyPlan; // Make optional
     onNavigate: (screen: Screen) => void;
-    onStartQuiz: (questions: QuestionModel[], title: string, routineTask?: { planId: string, logId: string, type: 'reading' | 'review' }) => void;
+    onStartQuiz: (
+        questions: QuestionModel[],
+        title: string,
+        routineTask?: {
+            planId: string;
+            logId: string;
+            type: 'reading' | 'review';
+            completedQuestionIds: number[];
+            totalTargetCount: number;
+        }
+    ) => void;
     certification: string; // Add certification prop
 }
 
@@ -72,25 +82,46 @@ const CourseRoutineScreen: React.FC<CourseRoutineScreenProps> = ({ session, plan
                 const progress = plan.currentDay / planDays;
                 const learningCutoff = 0.8;
 
-                let newRatio = 0;
+                let computedNewCount = 0;
+                let computedReviewCount = 0;
 
                 if (progress < learningCutoff) {
                     // User Request: 60% New Concept, 40% Review(+Supplement)
-                    // We calculate capacity first, then split it.
-
-                    const newCount = Math.ceil(dailyCapacity * 0.6);
-                    const reviewCount = Math.floor(dailyCapacity * 0.4);
-
-                    setDailyStats({ newCount, reviewCount });
+                    computedNewCount = Math.ceil(dailyCapacity * 0.6);
+                    computedReviewCount = Math.floor(dailyCapacity * 0.4);
                 } else {
                     // Final Phase: 100% Review
-                    setDailyStats({ newCount: 0, reviewCount: dailyCapacity });
+                    computedNewCount = 0;
+                    computedReviewCount = dailyCapacity;
                 }
 
-                setDailyStats(prev => ({
-                    newCount: Math.max(0, prev.newCount),
-                    reviewCount: Math.max(10, prev.reviewCount)
-                }));
+                const normalizedNewCount = Math.max(0, computedNewCount);
+                const normalizedReviewCount = Math.max(10, computedReviewCount);
+
+                const targetNewCount = log.readingTargetCount ?? normalizedNewCount;
+                const targetReviewCount = log.reviewTargetCount ?? normalizedReviewCount;
+
+                setDailyStats({ newCount: targetNewCount, reviewCount: targetReviewCount });
+
+                if (log.readingTargetCount === null || log.reviewTargetCount === null) {
+                    await quizApi.updateDailyTargets(log.id, {
+                        readingTargetCount: targetNewCount,
+                        reviewTargetCount: targetReviewCount
+                    });
+                }
+
+                const readingDone = log.readingQuestionIds?.length ?? 0;
+                const reviewDone = log.reviewQuestionIds?.length ?? 0;
+
+                if (!log.completedReading && targetNewCount > 0 && readingDone >= targetNewCount) {
+                    await quizApi.updateDailyProgress(log.id, { reading: true });
+                    log = { ...log, completedReading: true };
+                }
+
+                if (!log.completedReview && targetReviewCount > 0 && reviewDone >= targetReviewCount) {
+                    await quizApi.updateDailyProgress(log.id, { review: true });
+                    log = { ...log, completedReview: true };
+                }
                 // Reverted Logic: limiting review count reduced study volume too much.
                 // We will fill the gap with "Reinforcement" questions instead.
 
@@ -122,19 +153,42 @@ const CourseRoutineScreen: React.FC<CourseRoutineScreenProps> = ({ session, plan
         // Load dynamically calculated number of questions
         // If newCount is 0 (Final Phase), effectively skip or just do a small random set? 
         // UI hides button if count is 0 ideally, but for safety:
-        const count = dailyStats.newCount > 0 ? dailyStats.newCount : 5;
+        const completedIds = dailyLog.readingQuestionIds ?? [];
+        const remainingCount = Math.max(dailyStats.newCount - completedIds.length, 0);
+
+        if (remainingCount <= 0) {
+            alert('오늘의 개념 학습을 이미 완료했습니다.');
+            return;
+        }
 
         // Load from API
         // Note: loadQuestions loads randomly. In real app, we need 'unseen' filter.
         const questions = await quizApi.loadQuestions({ subject, certification: plan.certification });
 
-        const sessionQuestions = questions.sort(() => 0.5 - Math.random()).slice(0, count);
+        const completedSet = new Set(completedIds);
+        const freshPool = questions.filter(q => !completedSet.has(q.id));
+        const sessionQuestions = freshPool.sort(() => 0.5 - Math.random()).slice(0, remainingCount);
+
+        if (sessionQuestions.length < remainingCount) {
+            const shortage = remainingCount - sessionQuestions.length;
+            const fallback = questions
+                .filter(q => !sessionQuestions.some(selected => selected.id === q.id))
+                .sort(() => 0.5 - Math.random())
+                .slice(0, shortage);
+            sessionQuestions.push(...fallback);
+        }
 
         // Pass task context to allow completion on finish
         onStartQuiz(
             sessionQuestions,
             `Day ${plan.currentDay}: ${subject} 개념 학습`,
-            { planId: plan.id, logId: dailyLog.id, type: 'reading' }
+            {
+                planId: plan.id,
+                logId: dailyLog.id,
+                type: 'reading',
+                completedQuestionIds: completedIds,
+                totalTargetCount: dailyStats.newCount
+            }
         );
     };
 
@@ -142,10 +196,21 @@ const CourseRoutineScreen: React.FC<CourseRoutineScreenProps> = ({ session, plan
         if (!dailyLog || !plan) return;
         const wrongAnswers = await quizApi.getWrongAnswers(session.user.id);
 
+        const completedIds = dailyLog.reviewQuestionIds ?? [];
         const targetCount = dailyStats.reviewCount;
+        const remainingCount = Math.max(targetCount - completedIds.length, 0);
+
+        if (remainingCount <= 0) {
+            alert('오늘의 복습을 이미 완료했습니다.');
+            return;
+        }
 
         // 1. Get Wrong Answers first
-        const reviewIds = wrongAnswers.slice(0, targetCount).map(w => w.questionId);
+        const completedSet = new Set(completedIds);
+        const reviewIds = wrongAnswers
+            .map(w => w.questionId)
+            .filter(id => !completedSet.has(id))
+            .slice(0, remainingCount);
         let questions: QuestionModel[] = [];
 
         for (const id of reviewIds) {
@@ -155,8 +220,8 @@ const CourseRoutineScreen: React.FC<CourseRoutineScreenProps> = ({ session, plan
 
         // 2. Fill Gap with "Reinforcement" (Random from current subject) if not enough wrong answers
         // This ensures the user maintains the high daily study volume (Repetition).
-        if (questions.length < targetCount) {
-            const shortfall = targetCount - questions.length;
+        if (questions.length < remainingCount) {
+            const shortfall = remainingCount - questions.length;
             const subject = dailyLog.targetSubjects[0]; // Fallback to current subject for drill
 
             // Fetch extras
@@ -164,7 +229,7 @@ const CourseRoutineScreen: React.FC<CourseRoutineScreenProps> = ({ session, plan
             // Filter out duplicates if possible (simple check)
             const existingIds = new Set(questions.map(q => q.id));
             const extras = extraQs
-                .filter(q => !existingIds.has(q.id))
+                .filter(q => !existingIds.has(q.id) && !completedSet.has(q.id))
                 .sort(() => 0.5 - Math.random()) // Shuffle
                 .slice(0, shortfall);
 
@@ -182,14 +247,20 @@ const CourseRoutineScreen: React.FC<CourseRoutineScreenProps> = ({ session, plan
             return;
         }
 
-        const title = reviewIds.length < targetCount
+        const title = reviewIds.length < remainingCount
             ? `Day ${plan.currentDay}: 오답 복습 + 핵심 보충 (${questions.length}문항)`
             : `Day ${plan.currentDay}: 오답 복습`;
 
         onStartQuiz(
             questions,
             title,
-            { planId: plan.id, logId: dailyLog.id, type: 'review' }
+            {
+                planId: plan.id,
+                logId: dailyLog.id,
+                type: 'review',
+                completedQuestionIds: completedIds,
+                totalTargetCount: targetCount
+            }
         );
     };
 

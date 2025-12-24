@@ -1,5 +1,6 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { GoogleGenerativeAI } from "npm:@google/generative-ai";
+import OpenAI from "npm:openai";
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -62,22 +63,46 @@ serve(async (req) => {
           generationConfig.responseSchema = schema;
         }
 
-        const geminiModel = genAI.getGenerativeModel({
-          model: modelName,
-          generationConfig
-        });
+        try {
+          const geminiModel = genAI.getGenerativeModel({
+            model: modelName,
+            generationConfig
+          });
 
-        // Build parts array
-        const parts = [];
-        if (typeof prompt === 'string') {
-          parts.push({ text: prompt });
-        }
-        if (imageParts && Array.isArray(imageParts)) {
-          parts.push(...imageParts);
-        }
+          // Build parts array
+          const parts = [];
+          if (typeof prompt === 'string') {
+            parts.push({ text: prompt });
+          }
+          if (imageParts && Array.isArray(imageParts)) {
+            parts.push(...imageParts);
+          }
 
-        const response = await geminiModel.generateContent(parts);
-        result = response.response.text();
+          const response = await geminiModel.generateContent(parts);
+          result = response.response.text();
+        } catch (geminiError) {
+          const openAiKey = Deno.env.get('OPENAI_API_KEY');
+          if (!openAiKey) throw geminiError;
+
+          console.warn('Gemini generateContent failed, falling back to OpenAI.');
+          const openai = new OpenAI({ apiKey: openAiKey });
+          const schemaNote = schema
+            ? `\n\nJSON schema:\n${JSON.stringify(schema)}`
+            : '';
+          const systemPrompt = 'Return only valid JSON. Do not include any extra text.';
+          const userPrompt = `${prompt}${schemaNote}`;
+
+          const completion = await openai.chat.completions.create({
+            model: "gpt-4o-mini",
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: userPrompt }
+            ],
+            response_format: { type: "json_object" }
+          });
+
+          result = completion.choices[0]?.message?.content || '';
+        }
         break;
       }
 

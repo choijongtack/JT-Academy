@@ -1150,7 +1150,11 @@ export const quizApi = {
       completedReading: data.completed_reading,
       completedReview: data.completed_review,
       completedMock: data.completed_mock,
-      targetSubjects: data.target_subjects
+      targetSubjects: data.target_subjects,
+      readingQuestionIds: data.reading_question_ids || [],
+      reviewQuestionIds: data.review_question_ids || [],
+      readingTargetCount: data.reading_target_count ?? null,
+      reviewTargetCount: data.review_target_count ?? null
     };
   },
 
@@ -1167,7 +1171,9 @@ export const quizApi = {
         target_subjects: subjects,
         completed_reading: false,
         completed_review: false,
-        completed_mock: false
+        completed_mock: false,
+        reading_question_ids: [],
+        review_question_ids: []
       })
       .select()
       .single();
@@ -1181,7 +1187,11 @@ export const quizApi = {
       completedReading: data.completed_reading,
       completedReview: data.completed_review,
       completedMock: data.completed_mock,
-      targetSubjects: data.target_subjects
+      targetSubjects: data.target_subjects,
+      readingQuestionIds: data.reading_question_ids || [],
+      reviewQuestionIds: data.review_question_ids || [],
+      readingTargetCount: data.reading_target_count ?? null,
+      reviewTargetCount: data.review_target_count ?? null
     };
   },
 
@@ -1191,6 +1201,27 @@ export const quizApi = {
     if (updates.review !== undefined) payload.completed_review = updates.review;
     if (updates.mock !== undefined) payload.completed_mock = updates.mock;
 
+    await supabase.from('daily_study_logs').update(payload).eq('id', logId);
+  },
+
+  updateDailyQuestionIds: async (
+    logId: string,
+    type: 'reading' | 'review',
+    questionIds: number[]
+  ): Promise<void> => {
+    const payload: any = {};
+    if (type === 'reading') payload.reading_question_ids = questionIds;
+    if (type === 'review') payload.review_question_ids = questionIds;
+    await supabase.from('daily_study_logs').update(payload).eq('id', logId);
+  },
+
+  updateDailyTargets: async (
+    logId: string,
+    targets: { readingTargetCount?: number; reviewTargetCount?: number }
+  ): Promise<void> => {
+    const payload: any = {};
+    if (targets.readingTargetCount !== undefined) payload.reading_target_count = targets.readingTargetCount;
+    if (targets.reviewTargetCount !== undefined) payload.review_target_count = targets.reviewTargetCount;
     await supabase.from('daily_study_logs').update(payload).eq('id', logId);
   },
 

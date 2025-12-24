@@ -186,4 +186,8 @@ export interface DailyStudyLog {
   completedReview: boolean;
   completedMock: boolean;
   targetSubjects: string[];
+  readingQuestionIds?: number[];
+  reviewQuestionIds?: number[];
+  readingTargetCount?: number | null;
+  reviewTargetCount?: number | null;
 }
