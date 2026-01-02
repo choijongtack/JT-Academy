@@ -1,9 +1,10 @@
-/// <reference types="vite/client" />
+﻿/// <reference types="vite/client" />
 
 import { QuestionModel, AnalyzedQuestionResponse, GeneratedVariantProblem } from "../types";
 import { SUBJECT_TOPICS, CERTIFICATION_SUBJECTS, TOPIC_KEYWORD_OVERRIDES } from "../constants";
 import { supabase } from "./supabaseClient";
-import { Type } from "@google/genai";
+import { DEFAULT_LLM_MODEL, getStoredLlmModel } from "../utils/llmSettings";
+
 
 // Helper to convert File -> base64
 const fileToGenerativePart = async (file: File) => {
@@ -50,13 +51,14 @@ const unwrapFunctionResponse = <T>(data: any, error: any, defaultMessage: string
 
 const normalizeTopicForSubject = (subject?: string, proposedTopic?: string): string => {
     const subjectTopics = subject ? SUBJECT_TOPICS[subject] : undefined;
+    const fallback = '\uAE30\uD0C0';
     if (!subjectTopics || subjectTopics.length === 0) {
-        return '기타';
+        return fallback;
     }
 
     const clean = (proposedTopic || '').replace(/\s+/g, '').toLowerCase();
     if (clean.length === 0) {
-        return '기타';
+        return fallback;
     }
 
     const normalize = (value: string) => value.replace(/\s+/g, '').toLowerCase();
@@ -74,7 +76,19 @@ const normalizeTopicForSubject = (subject?: string, proposedTopic?: string): str
         return partialMatch;
     }
 
-    return '기타';
+    return fallback;
+};
+
+const normalizeDifficulty = (value?: string): '\uC0C1' | '\uC911' | '\uD558' => {
+    const high = '\uC0C1';
+    const mid = '\uC911';
+    const low = '\uD558';
+    const raw = (value ?? '').toString().trim().toLowerCase();
+    if (!raw) return mid;
+    if (raw.includes(high) || raw === 'high' || raw === 'hard') return high;
+    if (raw.includes(low) || raw === 'low' || raw === 'easy') return low;
+    if (raw.includes(mid) || raw === 'medium') return mid;
+    return mid;
 };
 
 const normalizeForComparison = (value: string) => value.replace(/\s+/g, '').toLowerCase();
@@ -158,6 +172,13 @@ const resolveTopicCategory = (question: QuestionModel, candidateTopic?: string |
     return normalizeTopicForSubject(question.subject, topicToNormalize);
 };
 
+const resolveSelectedModel = () => getStoredLlmModel() || DEFAULT_LLM_MODEL;
+
+const withSelectedModel = <T extends Record<string, any>>(payload: T) => ({
+    ...payload,
+    model: resolveSelectedModel()
+});
+
 export interface ExplanationChatMessage {
     role: 'user' | 'assistant';
     content: string;
@@ -174,16 +195,17 @@ export const sendExplanationFollowUpMessage = async (
                 payload: {
                     certification: question.certification,
                     question,
-                    messages
+                    messages,
+                    model: resolveSelectedModel()
                 }
             }
         });
 
-        const payload = unwrapFunctionResponse<string | unknown>(data, error, 'AI 해설 응답이 비어 있습니다.');
+        const payload = unwrapFunctionResponse<string | unknown>(data, error, 'AI 해설 답변이 비어 있습니다.');
         return typeof payload === 'string' ? payload : JSON.stringify(payload);
     } catch (error) {
         console.error("Error sending explanation chat message:", error);
-        throw new Error("AI 해설 채팅 응답을 가져오지 못했습니다. 잠시 후 다시 시도해주세요.");
+        throw new Error("AI 해설 채팅 답변을 가져오지 못했습니다. 다시 시도해 주세요.");
     }
 };
 
@@ -211,13 +233,12 @@ export const analyzeQuestionFromImage = async (imageFile: File, questionNumber: 
         You are a professional tutor and AI question analyzer for the 'Electrical Engineer Certification Exam' in Korea.
         Analyze the provided image of an exam paper.
 
-        1.  **Identify Question:** Find question number ${questionNumber || 'auto'}. If the number is not specified or unclear, find the most prominent question.
-        2.  **Analyze:** Determine the engineering principle, key formula, and topic for this question.
-        3.  **Format Output:**
-            - All mathematical formulas and symbols MUST be in LaTeX format enclosed in '$' (e.g., $V = IR$, $\\epsilon_r$).
-            - The final output MUST be a single, strict JSON object matching the provided schema. Do not include any text outside the JSON object.
+        1. Identify Question: Find question number ${questionNumber || 'auto'}.
+        2. Analyze: Determine the engineering principle, key formula, and topic for this question.
+        3. Format Output:
+           - All formulas must be in LaTeX with '$...$'.
+           - Output must be a strict JSON object matching the schema.
     `;
-
     try {
         const { data, error } = await supabase.functions.invoke('gemini-proxy', {
             body: {
@@ -225,7 +246,8 @@ export const analyzeQuestionFromImage = async (imageFile: File, questionNumber: 
                 payload: {
                     prompt,
                     imageParts: [imagePart],
-                    schema
+                    schema,
+                    model: resolveSelectedModel()
                 }
             }
         });
@@ -255,35 +277,26 @@ export const generateVariantQuestion = async (question: QuestionModel): Promise<
 
     const prompt = `
         You are a professional tutor and AI question generator for the 'Electrical Engineer Certification Exam' in Korea.
-        Analyze the provided original question and generate a new, similar 'Variant Question'.
+        Analyze the provided original question and generate a new, similar variant question.
 
-        **Original Question:**
-        - **Subject:** ${question.subject}
-        - **Question:** ${question.questionText}
-        - **Options:** ${JSON.stringify(question.options)}
-        - **Correct Answer:** ${question.options[question.answerIndex]}
+        Original:
+        - Subject: ${question.subject}
+        - Question: ${question.questionText}
+        - Options: ${JSON.stringify(question.options)}
+        - Correct Answer: ${question.options[question.answerIndex]}
 
-        **Instructions:**
-        1.  **Language**: ALL output MUST be in KOREAN (한국어).
-        2.  **Analyze**: Understand the core engineering principle, topic, and formula of the original question.
-        3.  **Generate Variant**:
-            - Keep the same core concept and difficulty level.
-            - Change numerical values, component specifications, or specific conditions.
-            - Create four new multiple-choice options, including plausible distractors. Ensure there is only one correct answer.
-            - Provide a detailed step-by-step explanation for the correct answer of the *new* variant question.
-        4.  **Explanation Structure**:
-            - **Solution**: Step-by-step calculation or reasoning.
-            - **Key Memorization Point (암기 포인트)**: The core formula or concept needed.
-        5.  **Format Output**:
-            - All mathematical formulas and symbols MUST be in LaTeX format enclosed in '$' (e.g., $V = IR$, $\\epsilon_r$).
-            - The final output MUST be a single, strict JSON object matching the provided schema. Do not include any text outside the JSON object.
+        Instructions:
+        - Output MUST be in Korean.
+        - Keep the same core concept and difficulty.
+        - Provide 4 options with exactly one correct answer.
+        - Provide a step-by-step explanation for the new question.
+        - Output must be a strict JSON object matching the schema.
     `;
-
     try {
         const { data, error } = await supabase.functions.invoke('gemini-proxy', {
             body: {
                 action: 'generateVariant',
-                payload: { prompt, schema }
+                payload: withSelectedModel({ prompt, schema })
             }
         });
 
@@ -307,51 +320,67 @@ export const analyzeQuestionsFromText = async (text: string): Promise<QuestionMo
                 year: { type: "INTEGER" },
                 questionText: { type: "STRING" },
                 options: { type: "ARRAY", items: { type: "STRING" } },
-                answerIndex: { type: "INTEGER" },
-                aiExplanation: { type: "STRING" },
+                answerIndex: { type: "INTEGER", nullable: true },
+                aiExplanation: { type: "STRING", nullable: true },
                 hint: { type: "STRING" },
-                rationale: { type: "STRING" },
+                rationale: { type: "STRING", nullable: true },
+                topicCategory: { type: "STRING" },
+                topicKeywords: { type: "ARRAY", items: { type: "STRING" } },
+                difficultyLevel: { type: "STRING" },
+                needsManualDiagram: { type: "BOOLEAN" }
             },
-            required: ["subject", "questionText", "options", "answerIndex", "aiExplanation"]
+            required: ["subject", "questionText", "options", "topicCategory", "topicKeywords"]
         }
     };
+
+    // Get all valid topics for context
+    const validTopics = Object.values(SUBJECT_TOPICS).flat();
+    const validTopicsString = JSON.stringify(validTopics);
 
     const prompt = `
         You are an expert exam parser.
         Extract multiple-choice questions from the provided text of an Electrical Engineer Certification Exam.
-        
-        **Instructions:**
-        1. **Language**: ALL output MUST be in KOREAN.
-        2. Identify individual questions.
-        3. Extract the subject (e.g., 'Electric Circuits', 'Electromagnetics', etc.) based on the content.
-        4. Extract the question text, options, and correct answer.
-           - **CRITICAL**: Preserve the original leading question number exactly as it appears (e.g., "2. 포소화약제…"). 
-             Do NOT renumber, remove, or renumber sequentially. If the source already includes a number prefix, keep it verbatim.
-           - **LaTeX**: If the original text contains LaTeX, keep it in both the question text and the options.
-             Always preserve $...$ delimiters in options as well.
-        5. If the correct answer is not explicitly marked, solve the question to find the correct answer index (0-3).
-        6. Provide a brief explanation.
-        7. **Hint**: Provide a short hint for solving the problem (optional).
-        8. **Rationale**: Provide a detailed explanation of why the answer is correct and others are wrong.
-        9. Set 'year' to the current year if not found in text.
-        10. Return a JSON array of QuestionModel objects.
-        
-        **Text to Analyze:**
-        ${text.substring(0, 30000)} 
-    `;
 
+        Instructions:
+        1. Language: output in Korean.
+        2. Identify individual questions.
+        3. Extract subject, question text, options, and correct answer.
+        4. Preserve the original leading question number (e.g., "2. ...").
+        5. If the source text includes "[그림 있음]", keep that tag inside questionText.
+        6. If a diagram is required, set needsManualDiagram=true and leave answer/explanation/rationale as null.
+        7. Provide topicCategory/topicKeywords/difficultyLevel for every question.
+        8. Return a JSON array of QuestionModel objects.
+
+        Text to Analyze:
+        ${text.substring(0, 30000)}
+    `;
     try {
         console.log(`[geminiService] analyzeQuestionsFromText: length=${textLength}`);
         const { data, error } = await supabase.functions.invoke('gemini-proxy', {
             body: {
                 action: 'generateContent',
-                payload: { prompt, schema }
+                payload: withSelectedModel({ prompt, schema })
             }
         });
 
         const payload = unwrapFunctionResponse<string | unknown>(data, error, 'Failed to extract questions from text.');
         const serialized = typeof payload === 'string' ? payload : JSON.stringify(payload);
-        return JSON.parse(serialized) as QuestionModel[];
+        const tryParse = (value: string): QuestionModel[] => JSON.parse(value) as QuestionModel[];
+        let parsed: QuestionModel[];
+        try {
+            parsed = tryParse(serialized);
+        } catch (parseError) {
+            const cleaned = serialized
+                .replace(/```json/g, '')
+                .replace(/```/g, '')
+                .replace(/\\(?!["\\/bfnrtu])/g, '\\\\')
+                .trim();
+            parsed = tryParse(cleaned);
+        }
+        return parsed.map(question => ({
+            ...question,
+            difficultyLevel: normalizeDifficulty(question.difficultyLevel)
+        }));
     } catch (error) {
         console.error("Error analyzing text:", error);
         throw new Error("Failed to extract questions from text.");
@@ -361,7 +390,7 @@ export const analyzeQuestionsFromText = async (text: string): Promise<QuestionMo
     }
 };
 
-const ELECTRICAL_ENGINEER_SUBJECTS = CERTIFICATION_SUBJECTS['전기기사'];
+const ELECTRICAL_ENGINEER_SUBJECTS = CERTIFICATION_SUBJECTS['\uC804\uAE30\uAE30\uC0AC'];
 
 const normalizeSubjectName = (subject?: string, allowedSubjects?: string[], fallback?: string): string | undefined => {
     if (!allowedSubjects || allowedSubjects.length === 0) {
@@ -410,9 +439,9 @@ export const analyzeQuestionsFromImages = async (images: string[], subjectHint?:
                 questionText: { type: "STRING" },
                 options: { type: "ARRAY", items: { type: "STRING" } },
                 answerIndex: { type: "INTEGER" },
-                aiExplanation: { type: "STRING" },
+                aiExplanation: { type: "STRING", nullable: true },
                 hint: { type: "STRING" },
-                rationale: { type: "STRING" },
+                rationale: { type: "STRING", nullable: true },
                 topicCategory: { type: "STRING" },
                 topicKeywords: { type: "ARRAY", items: { type: "STRING" } },
                 needsManualDiagram: { type: "BOOLEAN" },
@@ -424,60 +453,55 @@ export const analyzeQuestionsFromImages = async (images: string[], subjectHint?:
                         width: { type: "NUMBER" },
                         height: { type: "NUMBER" }
                     }
+                },
+                diagram_info: {
+                    type: "OBJECT",
+                    properties: {
+                        extracted_values: { type: "ARRAY", items: { type: "STRING" } },
+                        connections: { type: "ARRAY", items: { type: "STRING" } },
+                        axes: {
+                            type: "OBJECT",
+                            properties: {
+                                x_label: { type: "STRING" },
+                                x_unit: { type: "STRING" },
+                                y_label: { type: "STRING" },
+                                y_unit: { type: "STRING" },
+                                scale: { type: "STRING" },
+                                x_ticks: { type: "ARRAY", items: { type: "STRING" } },
+                                y_ticks: { type: "ARRAY", items: { type: "STRING" } },
+                                legend: { type: "ARRAY", items: { type: "STRING" } },
+                                table_headers: { type: "ARRAY", items: { type: "STRING" } }
+                            },
+                            nullable: true
+                        },
+                        sample_points: { type: "ARRAY", items: { type: "STRING" }, nullable: true },
+                        table_entries: { type: "ARRAY", items: { type: "STRING" }, nullable: true },
+                        description: { type: "STRING" },
+                        topology: { type: "STRING" }
+                    },
+                    nullable: true
                 }
             },
-            required: ["subject", "questionText", "options", "answerIndex", "aiExplanation"]
+            required: ["subject", "questionText", "options", "topicCategory", "topicKeywords"]
         }
     };
+
+    // Get all valid topics for context
+    const validTopics = Object.values(SUBJECT_TOPICS).flat();
+    const validTopicsString = JSON.stringify(validTopics);
 
     const prompt = `
         You are an expert exam parser for Electrical Engineering in Korea.
         Analyze the provided images of exam papers and extract multiple-choice questions.
-        
-        **CRITICAL INSTRUCTION - READ CAREFULLY**:
-        You MUST extract ALL questions visible in the image. Do NOT skip or miss ANY questions.
-        Scan the ENTIRE image systematically from top to bottom.
-        If you see 10 questions, extract all 10. If you see 20 questions, extract all 20.
-        Each question typically starts with a number followed by a period (e.g., "1.", "2.", "3.").
-        Continue scanning until you reach the end of the image. Do not stop after extracting just a few questions.
-        ${subjectHint ? `\n        **IMPORTANT**: The user has specified that these questions belong to the subject: "${subjectHint}". Please use this subject for all extracted questions unless it is clearly incorrect.\n` : ''}
-        **Instructions:**
-        1. **Language**: ALL output (Question, Options, Explanation, Subject) MUST be in KOREAN (한국어).
-        2. **Transcription**: Transcribe the question text and options EXACTLY as they appear in the image. 
-           - **IMPORTANT**: Start the 'questionText' with the question number followed by a period (e.g., "1. 다음 중..."). Do not omit the number.
-           - Do not summarize or paraphrase.
-        3. **Math & Formulas**: Transcribe mathematical formulas, symbols, and variables EXACTLY as they appear in the image using standard characters and Unicode (e.g., π, √, Ω, ±, θ, °, ∠, /, ^, _).
-           - **DO NOT** force conversion to LaTeX if the text is readable as plain text (e.g., write "(π/√2)Vm" instead of "\\frac{\pi}{\sqrt{2}}V_m").
-           - **ONLY** use LaTeX if the formula is extremely complex and cannot be represented clearly with standard characters.
-           - If using LaTeX, you MUST double-escape all backslashes (e.g., \\\\frac).
-           - Options: Ensure options also follow this "visual fidelity" rule.
-         4. **Diagrams**:
-            - **Trigger Condition**: Check if the question text contains keywords like "그림", "다음 그림", "아래 그림", "회로도", "결선도".
-            - **Action**: IF AND ONLY IF these keywords are present OR there is a clearly visible diagram/chart/graph associated with the question:
-              - Detect the bounding box coordinates of the diagram in the image.
-              - Return the coordinates in 'diagramBounds' as: { x: number, y: number, width: number, height: number }
-              - Coordinates MUST be in **ABSOLUTE PIXELS**, relative to the top-left corner of the image (0, 0).
-              - **DO NOT** use normalized coordinates (0-1). Return integers representing pixels.
-            - If NO diagram is present or keywords are missing, set 'diagramBounds' to null.
-            - Also describe the diagram briefly in Korean in the 'questionText' (e.g., "[회로도: R1=10Ω 병렬 연결...]").
-         5. **Subject**: Identify the subject in Korean (e.g., '전기자기학', '회로이론', '전력공학', '전기기기', '전기설비기술기준'). ${subjectHint ? `Prefer using \"${subjectHint}\" if applicable.` : ''}
-         6. **Answer**: Solve the question to find the correct answer index (0-3).
-         7. **Explanation**: Provide a detailed explanation in Korean.
-           - **CRITICAL**: Use proper Korean spacing (띄어쓰기). Each word must be separated by a space.
-           - **Example**: "정답은 ①입니다. 이는 옴의 법칙을 적용한 것입니다." (NOT "정답은①입니다.이는옴의법칙을적용한것입니다.")
-           - **Solution**: Step-by-step solution with proper spacing.
-           - **Key Memorization Point (암기 포인트)**: Explicitly state the formulas, concepts, or values that must be memorized to solve this type of problem.
-        8. **Hint**: Provide a short, helpful hint (e.g., "Think about Ohm's Law") in Korean with proper spacing.
-        9. **Rationale**: Provide a detailed reasoning for the correct answer and why distractors are incorrect. Use proper Korean spacing.
-        10. **Topic Classification**:
-           - Identify the 'topicCategory' for the question.
-           - Choose the most relevant topic from the following list based on the 'subject':
-           ${JSON.stringify(SUBJECT_TOPICS)}
-           - If the subject is not in the list or the topic is unclear, select the best fitting general topic or leave null.
-           - Also extract 2-3 'topicKeywords' (e.g., "Ohm's Law", "Voltage Drop").
-        11. **Output**: Return a JSON array of QuestionModel objects.
-    `;
 
+        Instructions:
+        1. Output MUST be in Korean.
+        2. Transcribe question text and options exactly as shown.
+        3. Start questionText with the question number (e.g., "1. ...").
+        4. If a diagram/chart/graph is present, set needsManualDiagram=true and include diagramBounds.
+        5. Provide topicCategory and topicKeywords.
+        6. Return a JSON array of QuestionModel objects.
+    `;
     // Prepare image parts
     const imageParts = images.map(base64Data => {
         const mimeMatch = base64Data.match(/^data:(image\/\w+);base64,/);
@@ -498,7 +522,8 @@ export const analyzeQuestionsFromImages = async (images: string[], subjectHint?:
                 payload: {
                     prompt,
                     imageParts,
-                    schema
+                    schema,
+                    model: resolveSelectedModel()
                 }
             }
         });
@@ -511,7 +536,7 @@ export const analyzeQuestionsFromImages = async (images: string[], subjectHint?:
             let processedQ = { ...q };
             let match: RegExpMatchArray | null = null;
 
-            // 1. Enforce Subject Rules (only for 전기기사 기본 세트)
+            // 1. Enforce Subject Rules (only for 전기기사 기본 파트)
             if (enforceNumberRule) {
                 match = processedQ.questionText.match(/^(\d+)\./);
                 if (match) {
@@ -540,13 +565,16 @@ export const analyzeQuestionsFromImages = async (images: string[], subjectHint?:
                 console.log(`[Rule-Based] Question ${match ? match[1] : 'unknown'}: Removed false positive diagram (No keywords found).`);
                 processedQ.diagramBounds = undefined;
             }
+            if (!processedQ.diagramBounds && hasKeyword) {
+                processedQ.needsManualDiagram = true;
+            }
 
 
             // 3. Add diagram indicator to questionText if diagramBounds exists
             if (processedQ.diagramBounds && !processedQ.questionText.includes('[다이어그램]')) {
                 // Insert diagram indicator after question number
                 if (match) {
-                    // Format: "1. [다이어그램] 다음 중..."
+                    // Format: "1. [다이어그램] 다음 문제.."
                     processedQ.questionText = processedQ.questionText.replace(
                         /^(\d+\.\s*)/,
                         '$1[다이어그램] '
@@ -557,12 +585,108 @@ export const analyzeQuestionsFromImages = async (images: string[], subjectHint?:
                 }
             }
 
-            return processedQ;
+            return {
+                ...processedQ,
+                difficultyLevel: normalizeDifficulty(processedQ.difficultyLevel)
+            };
         });
 
     } catch (error) {
         console.error("Error analyzing images:", error);
         throw new Error(`Failed to extract questions from images: ${error instanceof Error ? error.message : String(error)}`);
+    }
+};
+
+export const solveQuestionWithDiagram = async (
+    question: QuestionModel,
+    diagramImageBase64: string
+): Promise<{ result: Partial<QuestionModel>; warning?: string }> => {
+    // Clean base64 string if it contains data URL prefix
+    const cleanBase64 = diagramImageBase64.includes('base64,')
+        ? diagramImageBase64.split('base64,')[1]
+        : diagramImageBase64;
+
+    const imagePart = {
+        inlineData: {
+            data: cleanBase64,
+            mimeType: "image/jpeg"
+        }
+    };
+
+    const schema = {
+        type: "OBJECT",
+        properties: {
+            answerIndex: { type: "INTEGER" },
+            aiExplanation: { type: "STRING" },
+            rationale: { type: "STRING" },
+            diagram_info: {
+                type: "OBJECT",
+                properties: {
+                    extracted_values: { type: "ARRAY", items: { type: "STRING" } },
+                    connections: { type: "ARRAY", items: { type: "STRING" } },
+                    axes: {
+                        type: "OBJECT",
+                        properties: {
+                            x_label: { type: "STRING" },
+                            x_unit: { type: "STRING" },
+                            y_label: { type: "STRING" },
+                            y_unit: { type: "STRING" },
+                            scale: { type: "STRING" },
+                            x_ticks: { type: "ARRAY", items: { type: "STRING" } },
+                            y_ticks: { type: "ARRAY", items: { type: "STRING" } },
+                            legend: { type: "ARRAY", items: { type: "STRING" } },
+                            table_headers: { type: "ARRAY", items: { type: "STRING" } }
+                        },
+                        nullable: true
+                    },
+                    sample_points: { type: "ARRAY", items: { type: "STRING" }, nullable: true },
+                    table_entries: { type: "ARRAY", items: { type: "STRING" }, nullable: true },
+                    description: { type: "STRING" },
+                    topology: { type: "STRING" }
+                },
+                required: ["extracted_values", "connections", "description", "topology"]
+            }
+        },
+        required: ["answerIndex", "aiExplanation", "rationale", "diagram_info"]
+    };
+
+    const prompt = `
+        You are a professional Electrical Engineering tutor.
+        The user has provided a question text and its accompanying diagram/image.
+
+        Task:
+        1. Analyze the diagram and extract values/connections/axes into diagram_info.
+        2. Solve the question using the diagram and text.
+
+        Question Context:
+        - Subject: ${question.subject}
+        - Text: ${question.questionText}
+        - Options: ${JSON.stringify(question.options)}
+
+        Output:
+        - Language: Korean.
+        - Math: Use LaTeX with '$...$'.
+        - Output must be strict JSON matching the schema.
+    `;
+    try {
+        const { data, error } = await supabase.functions.invoke('gemini-proxy', {
+            body: {
+                action: 'analyzeImage',
+                payload: {
+                    prompt,
+                    imageParts: [imagePart],
+                    schema,
+                    model: resolveSelectedModel()
+                }
+            }
+        });
+
+        const warning = data && typeof data === 'object' && 'warning' in data ? (data as any).warning as string | undefined : undefined;
+        const result = unwrapFunctionResponse<Partial<QuestionModel>>(data, error, 'Failed to solve question with diagram.');
+        return { result, warning };
+    } catch (error) {
+        console.error("Error solving question with diagram:", error);
+        throw new Error("Failed to re-analyze the question with the provided diagram.");
     }
 };
 
@@ -599,17 +723,14 @@ export const analyzeDocument = async (
     const prompt = `
         You are an expert exam parser for Electrical Engineering in Korea.
         ${questionStart && questionEnd ? `Analyze the provided document and extract questions numbered from ${questionStart} to ${questionEnd}.` : 'Analyze the provided document and extract ALL multiple-choice questions.'}
-        
-        **Instructions:**
-        1. **Transcription**: Transcribe the question text and options exactly.
-        2. **Language**: Output in Korean.
-        3. **Math**: Use Unicode symbols (π, √, Ω) or plain text formulas (e.g., (π/√2)Vm).
-        4. **Diagrams**: If a question contains a diagram, set 'needsManualDiagram' to true since you are analyzing a document where extraction of separate image files is not possible via precise coordinates.
-        5. **Subject**: Identify the subject. ${subjectHint ? `Prefer using \"${subjectHint}\".` : ''}
-        6. **Topic**: Choose from the list: ${JSON.stringify(SUBJECT_TOPICS)}
-        7. **Output**: Return a JSON array of QuestionModel objects.
-    `;
 
+        Instructions:
+        1. Transcribe the question text and options exactly.
+        2. Output in Korean.
+        3. If a diagram is present, set needsManualDiagram to true.
+        4. Identify the subject (prefer "${subjectHint ?? ''}" if applicable).
+        5. Return a JSON array of QuestionModel objects.
+    `;
     // Convert file to base64 for Gemini
     const base64Data = await new Promise<string>((resolve, reject) => {
         const reader = new FileReader();
@@ -631,9 +752,9 @@ export const analyzeDocument = async (
             body: {
                 action: 'analyzeImage', // Highly stable action that handles server-side cleaning & parsing
                 payload: {
-                    model: "gemini-2.5-flash",
                     prompt,
                     schema,
+                    model: resolveSelectedModel(),
                     imageParts: [
                         {
                             inlineData: {
@@ -654,7 +775,10 @@ export const analyzeDocument = async (
             const normalizedSubject = normalizeSubjectName(processedQ.subject, allowedSubjects, subjectHint);
             if (normalizedSubject) processedQ.subject = normalizedSubject;
             processedQ.topicCategory = resolveTopicCategory(processedQ, processedQ.topicCategory);
-            return processedQ;
+            return {
+                ...processedQ,
+                difficultyLevel: normalizeDifficulty(processedQ.difficultyLevel)
+            };
         });
     } catch (error) {
         console.error("Error analyzing document:", error);
@@ -666,92 +790,240 @@ export const analyzeDocument = async (
  * Determines the subject based on the question number.
  */
 function determineSubjectByNumber(number: number): string | null {
-    if (number >= 1 && number <= 20) return '전기자기학';
-    if (number >= 21 && number <= 40) return '전력공학';
-    if (number >= 41 && number <= 60) return '전기기기';
-    if (number >= 61 && number <= 80) return '회로이론 및 제어공학';
-    if (number >= 81 && number <= 100) return '전기설비기술기준 및 판단기준';
+    if (number >= 1 && number <= 20) return '\uC804\uAE30\uC790\uAE30\uD559';
+    if (number >= 21 && number <= 40) return '\uC804\uB825\uACF5\uD559';
+    if (number >= 41 && number <= 60) return '\uC804\uAE30\uAE30\uAE30';
+    if (number >= 61 && number <= 80) return '\uD68C\uB85C\uC774\uB860 \uBC0F \uC81C\uC5B4\uACF5\uD559';
+    if (number >= 81 && number <= 100) return '\uC804\uAE30\uC124\uBE44\uAE30\uC220\uAE30\uC900 \uBC0F \uD310\uB2E8\uAE30\uC900';
     return null;
 }
 
-export const generateFiveVariants = async (originalQuestion: QuestionModel, examStandardsText?: string): Promise<QuestionModel[]> => {
+export interface AnswerSheetEntry {
+    question_number: number;
+    answer: string;
+}
+
+export const parseAnswerSheetFromImage = async (imageFile: File): Promise<AnswerSheetEntry[]> => {
+    const imagePart = await fileToGenerativePart(imageFile);
+
     const schema = {
         type: "ARRAY",
         items: {
             type: "OBJECT",
             properties: {
-                questionText: { type: "STRING" },
-                options: { type: "ARRAY", items: { type: "STRING" } },
-                answerIndex: { type: "INTEGER" },
-                aiExplanation: { type: "STRING" },
-                hint: { type: "STRING" },
-                rationale: { type: "STRING" },
+                question_number: { type: "INTEGER" },
+                answer: { type: "STRING" }
             },
-            required: ["questionText", "options", "answerIndex", "aiExplanation"]
+            required: ["question_number", "answer"]
         }
     };
 
-    const standardsContext = examStandardsText
-        ? `\n\n**출제 기준 참조 (Exam Standards Reference):**\n${examStandardsText.substring(0, 3000)}\n\n위 출제 기준을 참고하여 해당 범위 내에서 문제를 생성하세요. 출제 기준에 명시된 핵심 개념, 공식, 기술을 활용하세요.\n`
-        : '';
-
     const prompt = `
-        You are an expert exam question generator for Korean certification exams.
-        Based on the following original question, generate EXACTLY 5 unique variant questions.
-        ${standardsContext}
-        **Original Question:**
-        Subject: ${originalQuestion.subject}
-        Question: ${originalQuestion.questionText}
-        Options: ${JSON.stringify(originalQuestion.options)}
-        Answer: ${originalQuestion.options[originalQuestion.answerIndex]}
-        
-        **Requirements:**
-        1. **Language**: ALL output MUST be in KOREAN (한국어).
-        2. Keep the same subject and topic.
-        3. ${examStandardsText ? 'Generate questions based on the exam standards provided above. Focus on concepts, formulas, and techniques mentioned in the standards.' : 'Vary the numerical values or specific scenarios while testing the same underlying principle.'}
-        4. Ensure each variant has 4 options and 1 correct answer.
-        5. **Math & Formulas**: ALL mathematical formulas, symbols, and variables MUST be in LaTeX format enclosed in '$'.
-           - **CRITICAL JSON FORMATTING**: You are outputting JSON. Therefore, ALL backslashes in LaTeX must be **DOUBLE ESCAPED** (e.g., use \`\\\\\\\frac\` instead of \`\\\\frac\`, \`\\\\\\\times\` instead of \`\\\\times\`).
-           - Example: Write \`$ \\\\\\\\frac{\\\\\\\\partial B}{\\\\\\\\partial t} $\` (in JSON string it will look like \`"$\\\\\\\\frac{\\\\\\\\partial B}{\\\\\\\\partial t}$"\`).
-           - Do not use Unicode for math (e.g., do not use '×', '÷', 'Ω', 'π' directly). Use LaTeX (e.g., \`\\\\\\\\times\`, \`\\\\\\\\div\`, \`\\\\\\\\Omega\`, \`\\\\\\\\pi\`).
-           - Ensure fractions are properly formatted with \`\\\\\\\\frac{numerator}{denominator}\`.
-           - Options: Ensure options are also formatted with LaTeX if they contain math.
-        6. **Explanation**: Provide a clear explanation for each.
-           - **Structure**: Solution + Key Memorization Point (암기 포인트).
-        7. **Hint**: Provide a short hint for the new variant question.
-        8. **Rationale**: Provide a detailed rationale for the correct answer.
-        9. Return a JSON array of 5 objects.
+        You are extracting official answer keys from a Korean certification exam answer sheet image.
+        Read all question numbers and their answers.
+
+        **Rules:**
+        1. Output ONLY JSON matching the schema.
+        2. 'answer' MUST be one of: "\uAC00", "\uB098", "\uB2E4", "\uB77C".
+        3. Include every question number you can see.
+        4. If multiple subjects are present, continue numbering as shown (e.g., 1-100).
     `;
 
-    try {
-        const { data, error } = await supabase.functions.invoke('gemini-proxy', {
-            body: {
-                action: 'generateVariant',
-                payload: { prompt, schema }
+    const { data, error } = await supabase.functions.invoke('gemini-proxy', {
+        body: {
+            action: 'analyzeImage',
+            payload: {
+                prompt,
+                imageParts: [imagePart],
+                schema,
+                model: DEFAULT_LLM_MODEL
             }
-        });
+        }
+    });
 
-        const variants = unwrapFunctionResponse<any[]>(data, error, 'Failed to generate variant questions.');
-        return variants.map((v: any) => ({
-            ...v,
-            id: 0, // ID will be assigned by DB
-            subject: originalQuestion.subject,
-            year: originalQuestion.year,
-            isVariant: true,
-            parentQuestionId: originalQuestion.id,
-            certification: originalQuestion.certification,
-            topicCategory: originalQuestion.topicCategory,
-            topicKeywords: originalQuestion.topicKeywords
-        }));
-    } catch (error) {
-        console.error("Error generating 5 variants:", error);
-        throw new Error("Failed to generate variant questions.");
-    }
+    return unwrapFunctionResponse<AnswerSheetEntry[]>(data, error, 'Failed to parse answer sheet.');
 };
 
-export const searchYoutubeTutorial = async (keywords: string): Promise<any[]> => {
-    console.log(`Searching YouTube for: ${keywords}`);
-    return Promise.resolve([]);
+export const solveQuestionFromText = async (
+    question: QuestionModel
+): Promise<Pick<QuestionModel, 'answerIndex' | 'aiExplanation' | 'rationale'>> => {
+    const schema = {
+        type: "OBJECT",
+        properties: {
+            answerIndex: { type: "INTEGER" },
+            aiExplanation: { type: "STRING" },
+            rationale: { type: "STRING" }
+        },
+        required: ["answerIndex", "aiExplanation", "rationale"]
+    };
+
+    const prompt = `
+        You are a professional Electrical Engineering tutor.
+        Solve the following multiple-choice question.
+
+        **Question**
+        ${question.questionText}
+
+        **Options**
+        ${JSON.stringify(question.options)}
+
+        **Instructions**
+        - Return the correct answer index (0-3).
+        - Provide a concise explanation and rationale in Korean.
+        - Output ONLY a strict JSON object that matches the schema.
+    `;
+
+    const { data, error } = await supabase.functions.invoke('gemini-proxy', {
+        body: {
+            action: 'generateContent',
+            payload: withSelectedModel({ prompt, schema })
+        }
+    });
+
+    return unwrapFunctionResponse<Pick<QuestionModel, 'answerIndex' | 'aiExplanation' | 'rationale'>>(
+        data,
+        error,
+        'Failed to solve question from text.'
+    );
+};
+
+export const generateExplanationForAnswer = async (
+    question: QuestionModel,
+    answerIndex: number,
+    diagramImageBase64?: string
+): Promise<{
+    aiExplanation: string;
+    hint: string;
+    rationale: string;
+    diagram_info?: QuestionModel['diagram_info'];
+}> => {
+    const schema = {
+        type: "OBJECT",
+        properties: {
+            aiExplanation: { type: "STRING" },
+            hint: { type: "STRING" },
+            rationale: { type: "STRING" },
+            diagram_info: {
+                type: "OBJECT",
+                properties: {
+                    extracted_values: { type: "ARRAY", items: { type: "STRING" } },
+                    connections: { type: "ARRAY", items: { type: "STRING" } },
+                    axes: {
+                        type: "OBJECT",
+                        properties: {
+                            x_label: { type: "STRING" },
+                            x_unit: { type: "STRING" },
+                            y_label: { type: "STRING" },
+                            y_unit: { type: "STRING" },
+                            scale: { type: "STRING" },
+                            x_ticks: { type: "ARRAY", items: { type: "STRING" } },
+                            y_ticks: { type: "ARRAY", items: { type: "STRING" } },
+                            legend: { type: "ARRAY", items: { type: "STRING" } },
+                            table_headers: { type: "ARRAY", items: { type: "STRING" } }
+                        },
+                        nullable: true
+                    },
+                    sample_points: { type: "ARRAY", items: { type: "STRING" }, nullable: true },
+                    table_entries: { type: "ARRAY", items: { type: "STRING" }, nullable: true },
+                    description: { type: "STRING" },
+                    topology: { type: "STRING" }
+                },
+                required: ["extracted_values", "connections", "description", "topology"]
+            }
+        },
+        required: ["aiExplanation", "hint", "rationale"]
+    };
+
+    const correctOption = Array.isArray(question.options) ? question.options[answerIndex] : undefined;
+    const prompt = `
+        You are a professional Electrical Engineering tutor.
+        The correct answer is fixed by the official answer sheet.
+
+        Question:
+        ${question.questionText}
+
+        Options:
+        ${JSON.stringify(question.options)}
+
+        Official correct answer:
+        - Index: ${answerIndex}
+        - Option: ${correctOption ?? ''}
+
+        Instructions:
+        1. Explain why this answer is correct, and why the others are wrong.
+        2. Provide a concise hint in Korean.
+        3. If a diagram image is provided, incorporate it and extract diagram_info.
+        4. Output ONLY a strict JSON object matching the schema.
+    `;
+
+    const requestExplanation = async (modelName: string) => {
+        if (diagramImageBase64) {
+            const cleanBase64 = diagramImageBase64.includes('base64,')
+                ? diagramImageBase64.split('base64,')[1]
+                : diagramImageBase64;
+            const imagePart = {
+                inlineData: {
+                    data: cleanBase64,
+                    mimeType: "image/jpeg"
+                }
+            };
+            const { data, error } = await supabase.functions.invoke('gemini-proxy', {
+                body: {
+                    action: 'analyzeImage',
+                    payload: {
+                        prompt,
+                        imageParts: [imagePart],
+                        schema,
+                        model: modelName
+                    }
+                }
+            });
+            return unwrapFunctionResponse<{
+                aiExplanation: string;
+                hint: string;
+                rationale: string;
+                diagram_info?: QuestionModel['diagram_info'];
+            }>(data, error, 'Failed to generate explanation with diagram.');
+        }
+
+        const { data, error } = await supabase.functions.invoke('gemini-proxy', {
+            body: {
+                action: 'generateContent',
+                payload: {
+                    prompt,
+                    schema,
+                    model: modelName
+                }
+            }
+        });
+        return unwrapFunctionResponse<{
+            aiExplanation: string;
+            hint: string;
+            rationale: string;
+            diagram_info?: QuestionModel['diagram_info'];
+        }>(data, error, 'Failed to generate explanation for answer.');
+    };
+
+    const isEmptyText = (value?: string | null) => !value || value.trim().length === 0;
+
+    try {
+        const primaryModel = resolveSelectedModel();
+        let result = await requestExplanation(primaryModel);
+        const shouldRetry = isEmptyText(result.aiExplanation) || isEmptyText(result.hint) || isEmptyText(result.rationale);
+        if (shouldRetry && primaryModel !== DEFAULT_LLM_MODEL) {
+            console.warn(`[generateExplanationForAnswer] Empty response detected. Retrying with ${DEFAULT_LLM_MODEL}.`);
+            result = await requestExplanation(DEFAULT_LLM_MODEL);
+        }
+        return result;
+    } catch (error) {
+        console.error('generateExplanationForAnswer error:', error);
+        return {
+            aiExplanation: question.aiExplanation ?? '',
+            hint: question.hint ?? '',
+            rationale: question.rationale ?? '',
+            diagram_info: question.diagram_info
+        };
+    }
 };
 
 export async function classifyQuestionTopic(
@@ -759,7 +1031,7 @@ export async function classifyQuestionTopic(
 ): Promise<{
     topicCategory: string;
     topicKeywords: string[];
-    difficultyLevel: 'easy' | 'medium' | 'hard';
+    difficultyLevel: '\uC0C1' | '\uC911' | '\uD558';
 }> {
     const overrideTopic = detectTopicOverride(question);
     if (overrideTopic) {
@@ -767,40 +1039,36 @@ export async function classifyQuestionTopic(
         return {
             topicCategory: normalized,
             topicKeywords: [overrideTopic],
-            difficultyLevel: question.difficultyLevel || 'medium'
+            difficultyLevel: normalizeDifficulty(question.difficultyLevel)
         };
     }
 
+    const validTopics = Object.values(SUBJECT_TOPICS).flat();
     const prompt = `
-다음 전기기사 필기 시험 문제를 분석하여 주제를 분류해주세요.
+You are classifying the topic of a Korean electrical engineering exam question.
 
-과목: ${question.subject}
-문제: ${question.questionText}
-보기: ${question.options.join(', ')}
-
-다음 형식의 JSON으로 응답해주세요:
+Return a JSON object:
 {
-  "topicCategory": "구체적인 주제명",
-  "topicKeywords": ["핵심", "키워드", "배열"],
-  "difficultyLevel": "easy | medium | hard"
+  "topicCategory": "<best matching category>",
+  "topicKeywords": ["keyword1", "keyword2", "keyword3"],
+  "difficultyLevel": "\uC0C1 | \uC911 | \uD558"
 }
 
-주제 분류 가이드 (과목별):
-(생략 - 이전과 동일)
-난이도 기준:
-- easy: 기본 공식 직접 적용, 단순 계산 (1-2단계)
-- medium: 여러 단계 계산, 개념 이해 필요 (3-4단계)
-- hard: 복잡한 회로 해석, 고급 개념, 응용 (5단계 이상)
+Pick topicCategory from this list when possible:
+${JSON.stringify(validTopics)}
 
-주제명은 구체적이고 명확하게 작성하세요.
+Question:
+${question.questionText}
+
+Options:
+${Array.isArray(question.options) ? question.options.join(' / ') : ''}
 `;
 
     try {
         const { data, error } = await supabase.functions.invoke('gemini-proxy', {
             body: {
                 action: 'generateContent',
-                payload: {
-                    model: 'gemini-2.5-flash',
+                payload: withSelectedModel({
                     prompt,
                     schema: {
                         type: "OBJECT",
@@ -810,16 +1078,11 @@ export async function classifyQuestionTopic(
                             difficultyLevel: { type: "STRING" }
                         }
                     }
-                }
+                })
             }
         });
 
         const payload = unwrapFunctionResponse<string | unknown>(data, error, 'Failed to classify question topic.');
-        // Handle potential string response if schema wasn't strictly enforced by proxy logic for generic content
-        // But our proxy logic for generateContent with schema handles JSON parsing if schema is present?
-        // Actually my proxy code for generateContent returns response.text.
-        // So I need to parse it here.
-
         const text = typeof payload === 'string' ? payload : JSON.stringify(payload);
         const cleanText = text.replace(/```json/g, '').replace(/```/g, '').trim();
         const parsed = JSON.parse(cleanText);
@@ -828,14 +1091,14 @@ export async function classifyQuestionTopic(
         return {
             topicCategory: normalizedTopic,
             topicKeywords: Array.isArray(parsed.topicKeywords) ? parsed.topicKeywords : [],
-            difficultyLevel: parsed.difficultyLevel || 'medium',
+            difficultyLevel: normalizeDifficulty(parsed.difficultyLevel)
         };
     } catch (error) {
         console.error('Topic classification error:', error);
         return {
             topicCategory: resolveTopicCategory(question),
-            topicKeywords: [],
-            difficultyLevel: 'medium'
+            topicKeywords: question.topicKeywords ?? [],
+            difficultyLevel: normalizeDifficulty(question.difficultyLevel)
         };
     }
 }
@@ -872,8 +1135,6 @@ export async function batchClassifyTopics(
     const classified: QuestionModel[] = [];
     const chunkSize = Math.max(1, TOPIC_CLASSIFICATION_CONCURRENCY);
 
-    console.log(`Starting topic classification for ${questions.length} questions...`);
-
     for (let i = 0; i < questions.length; i += chunkSize) {
         const chunk = questions.slice(i, i + chunkSize);
         const results = await Promise.allSettled(
@@ -885,21 +1146,19 @@ export async function batchClassifyTopics(
             if (result.status === 'fulfilled') {
                 classified.push({
                     ...question,
-                    ...result.value,
+                    ...result.value
                 });
             } else {
-                console.error(`Failed to classify question "${question.questionText?.slice(0, 50)}...":`, result.reason);
                 classified.push({
                     ...question,
                     topicCategory: resolveTopicCategory(question),
                     topicKeywords: question.topicKeywords ?? [],
-                    difficultyLevel: question.difficultyLevel ?? 'medium'
+                    difficultyLevel: normalizeDifficulty(question.difficultyLevel)
                 });
             }
         });
     }
 
-    console.log(`Topic classification complete! ${classified.length} questions classified.`);
     return classified;
 }
 
@@ -917,27 +1176,27 @@ export const generateQuestionDetails = async (
     };
 
     const prompt = `
-당신은 전기기사 시험 전문 AI 튜터입니다.
-다음 문제에 대해 해설, 힌트, 정답 근거를 작성하세요.
-1. 해설(aiExplanation): 정답을 구하는 단계와 핵심 개념을 자세히 설명
-2. 힌트(hint): 수험생이 풀이를 떠올릴 수 있도록 간단한 방향 제시
-3. 근거(rationale): 정답이 맞는 이유와 오답이 틀린 이유를 짧게 정리
+You are a professional tutor for the Korean electrical engineering exam.
+Write a concise explanation, hint, and rationale for the following question.
 
-과목: ${question.subject || '미지정'}
-문항: ${question.questionText}
-보기: ${Array.isArray(question.options) ? question.options.join(' / ') : '보기 없음'}
-정답 인덱스: ${typeof question.answerIndex === 'number' ? question.answerIndex : '미지정'}
+Question:
+${question.questionText}
+
+Options:
+${Array.isArray(question.options) ? question.options.join(' / ') : ''}
+
+Instructions:
+- Provide a short explanation (aiExplanation) in Korean.
+- Provide a short hint in Korean.
+- Provide a rationale explaining why the correct answer is right and others are wrong.
+- Output a strict JSON object matching the schema.
 `;
 
     try {
         const { data, error } = await supabase.functions.invoke('gemini-proxy', {
             body: {
                 action: 'generateContent',
-                payload: {
-                    model: 'gemini-2.5-flash',
-                    prompt,
-                    schema
-                }
+                payload: withSelectedModel({ prompt, schema })
             }
         });
 
@@ -958,14 +1217,12 @@ export const generateQuestionDetails = async (
 
 export const extractTextFromImages = async (images: string[]): Promise<string> => {
     const prompt = `
-        You are an expert OCR system.
-        Extract ALL text from the provided images of documents.
-        Return ONLY the extracted text. Do not add any conversational filler.
-        Preserve the structure and formatting as much as possible.
-        If there are multiple images, separate the content of each image with "---PAGE BREAK---".
-    `;
+You are an expert OCR system.
+Extract ALL text from the provided images of documents.
+Return ONLY the extracted text. Do not add any conversational filler.
+If there are multiple images, separate them with "---PAGE BREAK---".
+`;
 
-    // Prepare image parts
     const imageParts = images.map(base64Data => {
         const mimeMatch = base64Data.match(/^data:(image\/\w+);base64,/);
         const mimeType = mimeMatch ? mimeMatch[1] : "image/jpeg";
@@ -973,7 +1230,7 @@ export const extractTextFromImages = async (images: string[]): Promise<string> =
         return {
             inlineData: {
                 data: cleanBase64,
-                mimeType: mimeType
+                mimeType
             }
         };
     });
@@ -982,18 +1239,81 @@ export const extractTextFromImages = async (images: string[]): Promise<string> =
         const { data, error } = await supabase.functions.invoke('gemini-proxy', {
             body: {
                 action: 'generateContent',
-                payload: {
-                    prompt,
-                    imageParts
-                }
+                payload: withSelectedModel({ prompt, imageParts })
             }
         });
 
         const payload = unwrapFunctionResponse<string | unknown>(data, error, 'Failed to extract text from images.');
         return typeof payload === 'string' ? payload : JSON.stringify(payload);
-
     } catch (error) {
-        console.error("Error extracting text from images:", error);
+        console.error("Error extracting text:", error);
         throw new Error("Failed to extract text from images.");
     }
 };
+
+export const generateFiveVariants = async (
+    originalQuestion: QuestionModel,
+    examStandardsText?: string
+): Promise<QuestionModel[]> => {
+    const schema = {
+        type: "ARRAY",
+        items: {
+            type: "OBJECT",
+            properties: {
+                questionText: { type: "STRING" },
+                options: { type: "ARRAY", items: { type: "STRING" } },
+                answerIndex: { type: "INTEGER" },
+                aiExplanation: { type: "STRING" },
+                hint: { type: "STRING" },
+                rationale: { type: "STRING" }
+            },
+            required: ["questionText", "options", "answerIndex", "aiExplanation"]
+        }
+    };
+
+    const standardsContext = examStandardsText
+        ? `\n\nExam Standards Reference:\n${examStandardsText.substring(0, 3000)}\n\n`
+        : '';
+
+    const prompt = `
+        You are an expert exam question generator for Korean certification exams.
+        Generate EXACTLY 5 unique variant questions based on the original.
+        ${standardsContext}
+        Original Question:
+        - Subject: ${originalQuestion.subject}
+        - Question: ${originalQuestion.questionText}
+        - Options: ${JSON.stringify(originalQuestion.options)}
+        - Answer: ${originalQuestion.options[originalQuestion.answerIndex]}
+
+        Requirements:
+        1. Output MUST be in Korean.
+        2. Keep the same subject and topic.
+        3. Vary the numbers or scenario while keeping the core concept.
+        4. Each variant has 4 options and 1 correct answer.
+        5. Provide explanation and hint.
+        6. Output a JSON array matching the schema.
+    `;
+
+    const { data, error } = await supabase.functions.invoke('gemini-proxy', {
+        body: {
+            action: 'generateVariant',
+            payload: withSelectedModel({ prompt, schema })
+        }
+    });
+
+    const variants = unwrapFunctionResponse<any[]>(data, error, 'Failed to generate variant questions.');
+    return variants.map((variant: any) => ({
+        ...variant,
+        id: 0,
+        subject: originalQuestion.subject,
+        year: originalQuestion.year,
+        isVariant: true,
+        parentQuestionId: originalQuestion.id,
+        certification: originalQuestion.certification,
+        topicCategory: originalQuestion.topicCategory,
+        topicKeywords: originalQuestion.topicKeywords,
+        difficultyLevel: originalQuestion.difficultyLevel
+    }));
+};
+
+

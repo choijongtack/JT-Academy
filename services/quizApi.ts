@@ -1,4 +1,4 @@
-import {
+﻿import {
   QuestionModel,
   UserQuizRecord,
   WrongAnswerModel,
@@ -32,6 +32,15 @@ const normalizeAnswerIndex = (value: any, fallback = 0): number => {
   }
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+const normalizeDifficulty = (value?: string): '상' | '중' | '하' => {
+  const raw = (value ?? '').toString().trim().toLowerCase();
+  if (!raw) return '중';
+  if (raw.includes('상') || raw === 'high' || raw === 'hard') return '상';
+  if (raw.includes('하') || raw === 'low' || raw === 'easy') return '하';
+  if (raw.includes('중') || raw === 'medium') return '중';
+  return '중';
 };
 
 const mapCertificationStandard = (item: any): CertificationStandard => {
@@ -80,6 +89,7 @@ export const quizApi = {
   loadQuestionsPaged: async ({
     subject,
     year,
+    examSession,
     topic,
     certification,
     search,
@@ -88,6 +98,7 @@ export const quizApi = {
   }: {
     subject?: string;
     year?: number;
+    examSession?: number;
     topic?: string;
     certification?: string;
     search?: string;
@@ -101,6 +112,9 @@ export const quizApi = {
       }
       if (year) {
         query = query.eq('year', year);
+      }
+      if (examSession) {
+        query = query.eq('exam_session', examSession);
       }
       if (topic) {
         if (topic === '기타' && subject && SUBJECT_TOPICS[subject]) {
@@ -151,10 +165,11 @@ export const quizApi = {
 
     return {
       questions: safeData.map(item => ({
-        id: item.id,
-        subject: item.subject,
-        year: item.year,
-        questionText: item.question_text,
+      id: item.id,
+      subject: item.subject,
+      year: item.year,
+      examSession: item.exam_session,
+      questionText: item.question_text,
         options: item.options,
         answerIndex: normalizeAnswerIndex(item.answer_index),
         aiExplanation: item.ai_explanation,
@@ -169,12 +184,14 @@ export const quizApi = {
         imageUrl: item.image_url,
         textFileUrl: item.text_file_url,
         diagramUrl: item.diagram_url,
-        certification: item.certification
+        certification: item.certification,
+        needsManualDiagram: item.needs_manual_diagram,
+        diagram_info: item.diagram_info
       })),
       count: count ?? 0
     };
   },
-  loadQuestions: async ({ subject, year, topic, certification }: { subject?: string; year?: number; topic?: string; certification?: string }): Promise<QuestionModel[]> => {
+  loadQuestions: async ({ subject, year, examSession, topic, certification }: { subject?: string; year?: number; examSession?: number; topic?: string; certification?: string }): Promise<QuestionModel[]> => {
     const buildQuery = (includeCertification: boolean) => {
       let query = supabase.from('questions').select('*');
       if (subject) {
@@ -182,6 +199,9 @@ export const quizApi = {
       }
       if (year) {
         query = query.eq('year', year);
+      }
+      if (examSession) {
+        query = query.eq('exam_session', examSession);
       }
       if (topic) {
         if (topic === '기타' && subject && SUBJECT_TOPICS[subject]) {
@@ -219,6 +239,7 @@ export const quizApi = {
       id: item.id,
       subject: item.subject,
       year: item.year,
+      examSession: item.exam_session,
       questionText: item.question_text,
       options: item.options,
       answerIndex: normalizeAnswerIndex(item.answer_index),
@@ -234,7 +255,9 @@ export const quizApi = {
       imageUrl: item.image_url,
       textFileUrl: item.text_file_url,
       diagramUrl: item.diagram_url,
-      certification: item.certification
+      certification: item.certification,
+      needsManualDiagram: item.needs_manual_diagram,
+      diagram_info: item.diagram_info
     }));
   },
 
@@ -431,6 +454,7 @@ export const quizApi = {
       id: data.id,
       subject: data.subject,
       year: data.year,
+      examSession: data.exam_session,
       questionText: data.question_text,
       options: data.options,
       answerIndex: normalizeAnswerIndex(data.answer_index),
@@ -442,7 +466,9 @@ export const quizApi = {
       imageUrl: data.image_url,
       textFileUrl: data.text_file_url,
       diagramUrl: data.diagram_url,
-      certification: data.certification
+      certification: data.certification,
+      needsManualDiagram: data.needs_manual_diagram,
+      diagram_info: data.diagram_info
     };
   },
 
@@ -548,6 +574,7 @@ export const quizApi = {
       id: item.id,
       subject: item.subject,
       year: item.year,
+      examSession: item.exam_session,
       questionText: item.question_text,
       options: item.options,
       answerIndex: normalizeAnswerIndex(item.answer_index),
@@ -563,7 +590,9 @@ export const quizApi = {
       imageUrl: item.image_url,
       textFileUrl: item.text_file_url,
       diagramUrl: item.diagram_url,
-      certification: item.certification
+      certification: item.certification,
+      needsManualDiagram: item.needs_manual_diagram,
+      diagram_info: item.diagram_info
     }));
   },
 
@@ -665,6 +694,7 @@ export const quizApi = {
       .insert({
         subject: question.subject,
         year: question.year,
+        exam_session: question.examSession ?? null,
         question_text: question.questionText,
         options: question.options,
         answer_index: question.answerIndex,
@@ -674,13 +704,15 @@ export const quizApi = {
         topic_category: question.topicCategory || null,
         topic_keywords: question.topicKeywords || [],
         frequency: question.frequency || 0,
-        difficulty_level: question.difficultyLevel || 'medium',
+        difficulty_level: normalizeDifficulty(question.difficultyLevel),
         hint: question.hint || null,
         rationale: question.rationale || null,
         image_url: question.imageUrl || null,
         text_file_url: question.textFileUrl || null,
         diagram_url: question.diagramUrl || null,
-        certification: question.certification || '전기기사'
+        certification: question.certification || '전기기사',
+        needs_manual_diagram: question.needsManualDiagram || false,
+        diagram_info: question.diagram_info || null
       })
       .select()
       .single();
@@ -694,6 +726,7 @@ export const quizApi = {
       id: data.id,
       subject: data.subject,
       year: data.year,
+      examSession: data.exam_session,
       questionText: data.question_text,
       options: data.options,
       answerIndex: normalizeAnswerIndex(data.answer_index),
@@ -709,7 +742,9 @@ export const quizApi = {
       imageUrl: data.image_url,
       textFileUrl: data.text_file_url,
       diagramUrl: data.diagram_url,
-      certification: data.certification
+      certification: data.certification,
+      needsManualDiagram: data.needs_manual_diagram,
+      diagram_info: data.diagram_info
     };
   },
 
@@ -729,6 +764,7 @@ export const quizApi = {
       id: item.id,
       subject: item.subject,
       year: item.year,
+      examSession: item.exam_session,
       questionText: item.question_text,
       options: item.options,
       answerIndex: normalizeAnswerIndex(item.answer_index),
@@ -942,6 +978,7 @@ export const quizApi = {
 
     if (updates.subject !== undefined) updateData.subject = updates.subject;
     if (updates.year !== undefined) updateData.year = updates.year;
+    if (updates.examSession !== undefined) updateData.exam_session = updates.examSession;
     if (updates.questionText !== undefined) updateData.question_text = updates.questionText;
     if (updates.options !== undefined) updateData.options = updates.options;
     if (updates.answerIndex !== undefined) updateData.answer_index = updates.answerIndex;
@@ -951,12 +988,13 @@ export const quizApi = {
     if (updates.topicCategory !== undefined) updateData.topic_category = updates.topicCategory;
     if (updates.topicKeywords !== undefined) updateData.topic_keywords = updates.topicKeywords;
     if (updates.frequency !== undefined) updateData.frequency = updates.frequency;
-    if (updates.difficultyLevel !== undefined) updateData.difficulty_level = updates.difficultyLevel;
+    if (updates.difficultyLevel !== undefined) updateData.difficulty_level = normalizeDifficulty(updates.difficultyLevel);
     if (updates.hint !== undefined) updateData.hint = updates.hint;
     if (updates.rationale !== undefined) updateData.rationale = updates.rationale;
     if (updates.imageUrl !== undefined) updateData.image_url = updates.imageUrl;
     if (updates.textFileUrl !== undefined) updateData.text_file_url = updates.textFileUrl;
     if (updates.diagramUrl !== undefined) updateData.diagram_url = updates.diagramUrl;
+    if (updates.diagram_info !== undefined) updateData.diagram_info = updates.diagram_info;
     if (updates.certification !== undefined) updateData.certification = updates.certification;
 
     // Check if there's anything to update
@@ -987,6 +1025,7 @@ export const quizApi = {
       id,
       subject: updates.subject || '',
       year: updates.year || 0,
+      examSession: updates.examSession,
       questionText: updates.questionText || '',
       options: updates.options || [],
       answerIndex: updates.answerIndex || 0,

@@ -4,6 +4,7 @@ export interface QuestionModel {
   id: number;
   subject: string;
   year: number;
+  examSession?: number;
   questionText: string;
   questionNumber?: number | null;
   options: string[];
@@ -19,7 +20,7 @@ export interface QuestionModel {
   topicCategory?: string;           // e.g., "키르히호프 법칙"
   topicKeywords?: string[];         // e.g., ["KVL", "KCL", "전압"]
   frequency?: number;                // Auto-calculated appearance count
-  difficultyLevel?: 'easy' | 'medium' | 'hard';
+  difficultyLevel?: 'easy' | 'medium' | 'hard' | '상' | '중' | '하';
 
   // Supabase Storage URLs
   imageUrl?: string;                // URL to original question image in Storage
@@ -32,6 +33,27 @@ export interface QuestionModel {
     height: number;
   };
   needsManualDiagram?: boolean;     // Flag for questions that need manual diagram insertion (e.g., from DOCX)
+
+  // Structured Diagram Analysis
+  diagram_info?: {
+    extracted_values: string[];     // e.g., ["V1=10V", "R1=5Ω"]
+    connections?: string[];         // Connections/relationships visible in the diagram
+    axes?: {
+      x_label?: string;
+      x_unit?: string;
+      y_label?: string;
+      y_unit?: string;
+      scale?: string;
+      x_ticks?: string[];
+      y_ticks?: string[];
+      legend?: string[];
+      table_headers?: string[];
+    } | null;
+    sample_points?: string[];       // Representative coordinates or table items
+    table_entries?: string[];       // Parsed table entries when applicable
+    description: string;            // Topology description
+    topology: string;               // e.g., "series", "parallel"
+  } | null;
 }
 
 export interface UserQuizRecord {

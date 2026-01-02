@@ -93,6 +93,15 @@ const normalizePlainText = (text: string): string => {
         .trim();
 };
 
+const normalizeDifficulty = (value?: string): '상' | '중' | '하' => {
+    const raw = (value ?? '').toString().trim().toLowerCase();
+    if (!raw) return '중';
+    if (raw.includes('상') || raw === 'high' || raw === 'hard') return '상';
+    if (raw.includes('하') || raw === 'low' || raw === 'easy') return '하';
+    if (raw.includes('중') || raw === 'medium') return '중';
+    return '중';
+};
+
 const segmentPlainTextQuestions = (text: string): PlainTextQuestionSegment[] => {
     const normalized = normalizePlainText(text);
     if (!normalized) return [];
@@ -152,7 +161,7 @@ const chunkSegmentsForGemini = (segments: PlainTextQuestionSegment[], maxChars: 
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-const DIAGRAM_PATTERN = /\[그림\s*있음\]/;
+const DIAGRAM_PATTERN = /\[\s*\uADF8\uB9BC\s*\uC788\uC74C\s*\]/;
 
 const BACKGROUND_METADATA_BATCH_SIZE = 5;
 const BACKGROUND_METADATA_DELAY_MS = 400;
@@ -285,6 +294,7 @@ export const useAiProcessing = ({
 
     // --- Year State ---
     const [yearInput, setYearInput] = useState<number | ''>('');
+    const [examSessionInput, setExamSessionInput] = useState<number | ''>('');
     const [autoDetectedYear, setAutoDetectedYear] = useState<number | null>(null);
     const [yearError, setYearError] = useState<string | null>(null);
     const [isYearTouched, setIsYearTouched] = useState(false);
@@ -356,6 +366,19 @@ export const useAiProcessing = ({
             return;
         }
         applyYearValue(numericValue);
+    };
+
+    const handleExamSessionInputChange = (rawValue: string) => {
+        if (rawValue.trim() === '') {
+            setExamSessionInput('');
+            return;
+        }
+        const numericValue = parseInt(rawValue, 10);
+        if (Number.isNaN(numericValue)) {
+            setExamSessionInput('');
+            return;
+        }
+        setExamSessionInput(numericValue);
     };
 
     const isYearValid = typeof yearInput === 'number' && yearError === null;
@@ -784,9 +807,13 @@ export const useAiProcessing = ({
                         Boolean(selectedSubject)
                     );
                     const diagramNumberSet = new Set<number>();
+                    const diagramIndexSet = new Set<number>();
                     relevantSegments.forEach(segment => {
-                        if (segment.questionNumber !== null && DIAGRAM_PATTERN.test(segment.text)) {
-                            diagramNumberSet.add(segment.questionNumber);
+                        if (DIAGRAM_PATTERN.test(segment.text)) {
+                            diagramIndexSet.add(relevantSegments.indexOf(segment));
+                            if (segment.questionNumber !== null) {
+                                diagramNumberSet.add(segment.questionNumber);
+                            }
                         }
                     });
 
@@ -837,9 +864,11 @@ export const useAiProcessing = ({
                         isQuestionInRange
                     );
                     enforcedSubjectQuestions = applyDiagramIndicators(enforcedSubjectQuestions);
-                    enforcedSubjectQuestions = enforcedSubjectQuestions.map(question => {
+                    enforcedSubjectQuestions = enforcedSubjectQuestions.map((question, idx) => {
                         const detectedNumber = extractLeadingQuestionNumber(question.questionText || '');
-                        if (detectedNumber !== null && diagramNumberSet.has(detectedNumber)) {
+                        const needsDiagramByNumber = detectedNumber !== null && diagramNumberSet.has(detectedNumber);
+                        const needsDiagramByIndex = detectedNumber === null && diagramIndexSet.has(idx);
+                        if (needsDiagramByNumber || needsDiagramByIndex) {
                             return {
                                 ...question,
                                 needsManualDiagram: true
@@ -1200,8 +1229,12 @@ export const useAiProcessing = ({
                         setPendingSubjectPackage(subjectPackage);
                         setIsBatchConfirmed(false);
                         const hasDiagrams = subjectPackage.questionDiagramMap.length > 0;
+                        const requiresManualDiagram = finalizedSubjectQuestions.some(q => q.needsManualDiagram);
                         setIsDiagramReviewOpen(hasDiagrams);
                         setIsDiagramReviewComplete(!hasDiagrams);
+                        if (!hasDiagrams && requiresManualDiagram) {
+                            setIsManualReviewOpen(true);
+                        }
                     } else {
                         setPendingSubjectPackage(null);
                         setIsBatchConfirmed(true);
@@ -1306,10 +1339,12 @@ export const useAiProcessing = ({
         imageUrl?: string | null;
         diagramUrl?: string | null;
         year?: number | null;
+        examSession?: number | null;
     }) => {
         return {
             subject: overrides?.subject ?? selectedSubject ?? question.subject,
             year: overrides?.year ?? question.year ?? new Date().getFullYear(),
+            exam_session: overrides?.examSession ?? question.examSession ?? null,
             question_text: question.questionText,
             options: question.options,
             answer_index: question.answerIndex,
@@ -1321,10 +1356,11 @@ export const useAiProcessing = ({
             topic_category: question.topicCategory ?? '기타',
             topic_keywords: question.topicKeywords ?? [],
             frequency: question.frequency ?? null,
-            difficulty_level: question.difficultyLevel ?? null,
+            difficulty_level: normalizeDifficulty(question.difficultyLevel),
             image_url: overrides?.imageUrl ?? question.imageUrl ?? null,
             text_file_url: question.textFileUrl ?? null,
             diagram_url: overrides?.diagramUrl ?? question.diagramUrl ?? null,
+            diagram_info: question.diagram_info ?? null,
             certification,
         };
     }, [certification, selectedSubject]);
@@ -1357,7 +1393,7 @@ export const useAiProcessing = ({
                     const updates = {
                         topic_category: classifiedQuestion.topicCategory ?? job.question.topicCategory ?? '기타',
                         topic_keywords: classifiedQuestion.topicKeywords ?? job.question.topicKeywords ?? [],
-                        difficulty_level: classifiedQuestion.difficultyLevel ?? job.question.difficultyLevel ?? null,
+                        difficulty_level: normalizeDifficulty(classifiedQuestion.difficultyLevel ?? job.question.difficultyLevel),
                         ai_explanation: detailResult.aiExplanation,
                         hint: detailResult.hint,
                         rationale: detailResult.rationale
@@ -1448,6 +1484,7 @@ export const useAiProcessing = ({
                 const questionToSave = mapQuestionToInsertPayload(questions[i], {
                     subject: selectedSubject || questions[i].subject,
                     year: resolvedYear,
+                    examSession: typeof examSessionInput === 'number' ? examSessionInput : null,
                     // imageUrl, diagramUrl
                 });
                 const { data: insertedRow, error: saveError } = await supabase
@@ -1457,23 +1494,26 @@ export const useAiProcessing = ({
                     .single();
                 if (saveError) throw saveError;
                 if (insertedRow?.id) {
-                    metadataJobs.push({
-                        questionId: insertedRow.id,
-                        question: {
-                            ...questions[i],
-                            subject: questionToSave.subject ?? questions[i].subject,
-                            year: questionToSave.year ?? resolvedYear,
-                            questionText: questionToSave.question_text,
-                            options: questionToSave.options,
-                            answerIndex: questionToSave.answer_index,
-                            aiExplanation: questionToSave.ai_explanation ?? questions[i].aiExplanation ?? '',
-                            hint: questionToSave.hint ?? questions[i].hint ?? '',
-                            rationale: questionToSave.rationale ?? questions[i].rationale ?? '',
-                            topicCategory: questionToSave.topic_category ?? questions[i].topicCategory,
-                            topicKeywords: questionToSave.topic_keywords ?? questions[i].topicKeywords,
-                            difficultyLevel: questionToSave.difficulty_level ?? questions[i].difficultyLevel
-                        }
-                    });
+                    const hasDiagram = Boolean(questionToSave.diagram_url || questions[i].needsManualDiagram);
+                    if (!hasDiagram) {
+                        metadataJobs.push({
+                            questionId: insertedRow.id,
+                            question: {
+                                ...questions[i],
+                                subject: questionToSave.subject ?? questions[i].subject,
+                                year: questionToSave.year ?? resolvedYear,
+                                questionText: questionToSave.question_text,
+                                options: questionToSave.options,
+                                answerIndex: questionToSave.answer_index,
+                                aiExplanation: questionToSave.ai_explanation ?? questions[i].aiExplanation ?? '',
+                                hint: questionToSave.hint ?? questions[i].hint ?? '',
+                                rationale: questionToSave.rationale ?? questions[i].rationale ?? '',
+                                topicCategory: questionToSave.topic_category ?? questions[i].topicCategory,
+                                topicKeywords: questionToSave.topic_keywords ?? questions[i].topicKeywords,
+                                difficultyLevel: normalizeDifficulty(questionToSave.difficulty_level ?? questions[i].difficultyLevel)
+                            }
+                        });
+                    }
                 }
             }
 
@@ -1571,6 +1611,8 @@ export const useAiProcessing = ({
         // Year
         yearInput,
         setYearInput: handleYearInputChange,
+        examSessionInput,
+        setExamSessionInput: handleExamSessionInputChange,
         autoDetectedYear,
         shouldShowYearError,
         yearError,

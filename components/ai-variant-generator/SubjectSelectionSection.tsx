@@ -11,6 +11,8 @@ interface SubjectSelectionSectionProps {
     setSelectedSubject: (subject: string | null) => void;
     yearInput: number | '';
     setYearInput: (val: string) => void;
+    examSessionInput: number | '';
+    setExamSessionInput: (val: string) => void;
     autoDetectedYear: number | null;
     yearError: string | null;
     shouldShowYearError: boolean;
@@ -23,6 +25,8 @@ const SubjectSelectionSection: React.FC<SubjectSelectionSectionProps> = ({
     setSelectedSubject,
     yearInput,
     setYearInput,
+    examSessionInput,
+    setExamSessionInput,
     autoDetectedYear,
     yearError,
     shouldShowYearError,
@@ -61,6 +65,16 @@ const SubjectSelectionSection: React.FC<SubjectSelectionSectionProps> = ({
                             onChange={(e) => setYearInput(e.target.value)}
                             className="w-full md:w-48 px-3 py-2 border border-slate-300 rounded-md focus:ring-blue-500 focus:border-blue-500 dark:bg-slate-700 dark:border-slate-600 dark:text-white"
                             placeholder={`${MIN_EXAM_YEAR}~${MAX_EXAM_YEAR}`}
+                        />
+                        <input
+                            type="number"
+                            min={1}
+                            max={4}
+                            inputMode="numeric"
+                            value={examSessionInput === '' ? '' : examSessionInput}
+                            onChange={(e) => setExamSessionInput(e.target.value)}
+                            className="w-full md:w-32 px-3 py-2 border border-slate-300 rounded-md focus:ring-blue-500 focus:border-blue-500 dark:bg-slate-700 dark:border-slate-600 dark:text-white"
+                            placeholder="회차"
                         />
                         <div className="text-xs text-slate-500 dark:text-slate-400">
                             {autoDetectedYear && !isYearTouched

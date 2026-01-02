@@ -1,8 +1,9 @@
 
-import React, { ChangeEvent } from 'react';
+import React, { ChangeEvent, useEffect, useMemo, useState } from 'react';
 import { Screen, AuthSession } from '../types';
 import { Certification } from '../constants';
 import { isAdmin } from '../services/authService';
+import { AVAILABLE_LLM_MODELS, DEFAULT_LLM_MODEL, getStoredLlmModel, setStoredLlmModel } from '../utils/llmSettings';
 
 // Hooks
 import { useAiProcessing } from './ai-variant-generator/useAiProcessing';
@@ -25,6 +26,24 @@ interface AiVariantGeneratorScreenProps {
 const AiVariantGeneratorScreen: React.FC<AiVariantGeneratorScreenProps> = ({ navigate, session, certification, onQuestionsUpdated }) => {
 
     const [selectedSubject, setSelectedSubject] = React.useState<string | null>(null);
+    const [selectedLlmModel, setSelectedLlmModel] = useState<string>(DEFAULT_LLM_MODEL);
+
+    useEffect(() => {
+        const storedModel = getStoredLlmModel();
+        if (storedModel) {
+            setSelectedLlmModel(storedModel);
+        }
+    }, []);
+
+    const selectedLlmOption = useMemo(
+        () => AVAILABLE_LLM_MODELS.find(option => option.id === selectedLlmModel),
+        [selectedLlmModel]
+    );
+
+    const handleLlmModelChange = (value: string) => {
+        setSelectedLlmModel(value);
+        setStoredLlmModel(value);
+    };
 
     // State & Logic from Hook
     const {
@@ -38,6 +57,8 @@ const AiVariantGeneratorScreen: React.FC<AiVariantGeneratorScreenProps> = ({ nav
         // Year State
         yearInput,
         setYearInput,
+        examSessionInput,
+        setExamSessionInput,
         autoDetectedYear,
         yearError,
         shouldShowYearError,
@@ -212,6 +233,8 @@ const AiVariantGeneratorScreen: React.FC<AiVariantGeneratorScreenProps> = ({ nav
                     setSelectedSubject={setSelectedSubject}
                     yearInput={yearInput}
                     setYearInput={(val) => setYearInput(val)} // Adapter
+                    examSessionInput={examSessionInput}
+                    setExamSessionInput={(val) => setExamSessionInput(val)}
                     autoDetectedYear={autoDetectedYear}
                     yearError={yearError}
                     shouldShowYearError={shouldShowYearError}
@@ -225,6 +248,39 @@ const AiVariantGeneratorScreen: React.FC<AiVariantGeneratorScreenProps> = ({ nav
                     onRemoveRange={handleRemoveSubjectRange}
                     onResetRanges={handleResetSubjectRanges}
                 />
+
+                {/* LLM Model Settings */}
+                <div className="mt-6 bg-slate-100 dark:bg-slate-700 p-4 rounded-lg space-y-3">
+                    <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+                        <div>
+                            <h3 className="font-semibold text-slate-800 dark:text-slate-200">LLM 모델</h3>
+                            <p className="text-sm text-slate-600 dark:text-slate-300">
+                                AI 생성 및 분석에 사용할 기본 모델을 선택합니다.
+                            </p>
+                        </div>
+                        <div className="flex items-center gap-3">
+                            <select
+                                value={selectedLlmModel}
+                                onChange={(e) => handleLlmModelChange(e.target.value)}
+                                className="px-3 py-2 border border-slate-300 dark:border-slate-600 rounded-lg bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 min-w-[240px]"
+                            >
+                                {AVAILABLE_LLM_MODELS.map(option => (
+                                    <option key={option.id} value={option.id}>
+                                        {option.label}
+                                    </option>
+                                ))}
+                            </select>
+                        </div>
+                    </div>
+                    <div className="text-xs text-slate-500 dark:text-slate-400">
+                        현재 선택: {selectedLlmOption?.label ?? selectedLlmModel}
+                        {selectedLlmOption?.provider ? ` (${selectedLlmOption.provider})` : ''}
+                        {selectedLlmOption?.note ? ` - ${selectedLlmOption.note}` : ''}
+                    </div>
+                    <div className="text-xs text-slate-500 dark:text-slate-400">
+                        모델별 이미지/문서 처리 지원 범위에 따라 결과 품질이 달라질 수 있습니다.
+                    </div>
+                </div>
 
                 {/* 3. Question File Upload */}
                 <div

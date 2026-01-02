@@ -1,6 +1,7 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect } from 'react';
 import { QuestionModel } from '../../types';
 import { uploadToStorage, generateUniqueFilename } from '../../services/storageService';
+import { solveQuestionWithDiagram } from '../../services/geminiService';
 
 interface ManualDiagramReviewProps {
     questions: QuestionModel[];
@@ -22,6 +23,7 @@ const ManualDiagramReview: React.FC<ManualDiagramReviewProps> = ({
 
     const [activeIndex, setActiveIndex] = useState(0);
     const [isUploading, setIsUploading] = useState(false);
+    const [warningMessage, setWarningMessage] = useState<string | null>(null);
 
     const activeItem = reviewItems[activeIndex];
 
@@ -31,6 +33,15 @@ const ManualDiagramReview: React.FC<ManualDiagramReviewProps> = ({
             setActiveIndex(0);
         }
     }, [activeIndex, reviewItems.length]);
+
+    const readFileAsDataUrl = (file: File): Promise<string> => {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result as string);
+            reader.onerror = reject;
+            reader.readAsDataURL(file);
+        });
+    };
 
     const finalizeMissingDiagrams = () => {
         reviewItems.forEach(item => {
@@ -71,6 +82,20 @@ const ManualDiagramReview: React.FC<ManualDiagramReviewProps> = ({
                 diagramUrl: url,
                 needsManualDiagram: false // Mark as resolved
             });
+            try {
+                const dataUrl = await readFileAsDataUrl(file);
+                const { result: solved, warning } = await solveQuestionWithDiagram(activeItem.question, dataUrl);
+                if (warning) {
+                    setWarningMessage(warning);
+                }
+                onUpdateQuestion(activeItem.originalIndex, {
+                    ...solved,
+                    diagramUrl: url,
+                    needsManualDiagram: false
+                });
+            } catch (solveError) {
+                console.error('Diagram solve failed:', solveError);
+            }
         } catch (error) {
             console.error('Image upload failed:', error);
             alert('이미지 업로드에 실패했습니다.');
@@ -136,6 +161,11 @@ const ManualDiagramReview: React.FC<ManualDiagramReviewProps> = ({
                         ✕
                     </button>
                 </header>
+                {warningMessage && (
+                    <div className="px-6 py-3 text-sm text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-900/30 border-b border-amber-200 dark:border-amber-800">
+                        {warningMessage}
+                    </div>
+                )}
 
                 <div className="flex-1 overflow-hidden flex flex-col md:flex-row divide-x divide-slate-200 dark:divide-slate-700">
                     {/* Left: Question Content */}

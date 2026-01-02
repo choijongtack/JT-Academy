@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { QuestionModel, AuthSession } from '../types';
 import { quizApi } from '../services/quizApi';
+import { parseAnswerSheetFromImage, generateExplanationForAnswer } from '../services/geminiService';
 import { supabase } from '../services/supabaseClient';
 import FormattedText from './FormattedText';
 import { isAdmin } from '../services/authService';
@@ -60,9 +61,41 @@ const normalizeTopicValue = (topic?: string | null): string => {
     return trimmed.length > 0 ? trimmed : '기타';
 };
 
+const preferNonEmptyText = (value?: string | null, fallback?: string | null): string => {
+    const trimmed = (value ?? '').toString().trim();
+    if (trimmed.length > 0) return trimmed;
+    const fallbackTrimmed = (fallback ?? '').toString().trim();
+    return fallbackTrimmed;
+};
+
 type ManagedQuestion = QuestionModel & {
     normalizedSubject: string;
     normalizedTopic: string;
+};
+
+type AnswerSheetEntry = {
+    question_number: number;
+    answer: string;
+};
+
+type AnswerMismatch = {
+    questionId: number;
+    questionNumber: number;
+    expectedIndex: number;
+    currentIndex: number;
+    question: ManagedQuestion;
+};
+
+type PendingUpdate = {
+    questionId: number;
+    questionNumber: number;
+    expectedIndex: number;
+    currentIndex: number;
+    newIndex: number;
+    aiExplanation: string;
+    hint: string;
+    rationale: string;
+    diagram_info?: QuestionModel['diagram_info'];
 };
 
 interface AdminQuestionManagementScreenProps {
@@ -74,11 +107,13 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
     const [questions, setQuestions] = useState<ManagedQuestion[]>([]);
     const [totalCount, setTotalCount] = useState<number | null>(null);
     const [availableYears, setAvailableYears] = useState<number[]>([]);
+    const [availableExamSessions, setAvailableExamSessions] = useState<number[]>([]);
     const [availableSubjects, setAvailableSubjects] = useState<string[]>([]);
     const [availableTopicsBySubject, setAvailableTopicsBySubject] = useState<Record<string, string[]>>({});
     const [availableCertifications, setAvailableCertifications] = useState<string[]>([]);
     const [subjectsByCertification, setSubjectsByCertification] = useState<Record<string, string[]>>({});
     const [yearsByCertification, setYearsByCertification] = useState<Record<string, number[]>>({});
+    const [sessionsByCertification, setSessionsByCertification] = useState<Record<string, number[]>>({});
     const [yearsByCertificationSubject, setYearsByCertificationSubject] = useState<Record<string, number[]>>({});
     const [topicsByCertificationSubject, setTopicsByCertificationSubject] = useState<Record<string, string[]>>({});
     const [loading, setLoading] = useState(true);
@@ -89,6 +124,7 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
     const [filterSubject, setFilterSubject] = useState<string>('');
     const [filterCertification, setFilterCertification] = useState<string>('');
     const [filterYear, setFilterYear] = useState<string>('');
+    const [filterExamSession, setFilterExamSession] = useState<string>('');
     const [filterTopic, setFilterTopic] = useState<string>('');
     const [searchText, setSearchText] = useState('');
     const [scrollTop, setScrollTop] = useState(0);
@@ -109,6 +145,14 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
 
     // Question detail modal
     const [selectedQuestion, setSelectedQuestion] = useState<ManagedQuestion | null>(null);
+    const [answerSheetFile, setAnswerSheetFile] = useState<File | null>(null);
+    const [answerSheetAnswers, setAnswerSheetAnswers] = useState<AnswerSheetEntry[]>([]);
+    const [answerMismatches, setAnswerMismatches] = useState<AnswerMismatch[]>([]);
+    const [pendingUpdates, setPendingUpdates] = useState<PendingUpdate[]>([]);
+    const [isParsingAnswerSheet, setIsParsingAnswerSheet] = useState(false);
+    const [isSolvingMismatches, setIsSolvingMismatches] = useState(false);
+    const [isConfirmingUpdates, setIsConfirmingUpdates] = useState(false);
+    const [showUpdatePreview, setShowUpdatePreview] = useState(false);
 
     // Check admin permission
     useEffect(() => {
@@ -123,11 +167,13 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
         setError(null);
         try {
             const yearValue = filterYear ? parseInt(filterYear, 10) : undefined;
+            const sessionValue = filterExamSession ? parseInt(filterExamSession, 10) : undefined;
             const { questions: fetchedQuestions, count } = await quizApi.loadQuestionsPaged({
                 certification: filterCertification || undefined,
                 subject: filterSubject || undefined,
                 topic: filterTopic || undefined,
                 year: Number.isNaN(yearValue ?? NaN) ? undefined : yearValue,
+                examSession: Number.isNaN(sessionValue ?? NaN) ? undefined : sessionValue,
                 search: searchText || undefined,
                 page: currentPage,
                 pageSize: itemsPerPage
@@ -151,16 +197,18 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
         } finally {
             setLoading(false);
         }
-    }, [filterCertification, filterSubject, filterTopic, filterYear, searchText, currentPage]);
+    }, [filterCertification, filterSubject, filterTopic, filterYear, filterExamSession, searchText, currentPage]);
 
     const loadFilterOptions = useCallback(async () => {
         const batchSize = 1000;
         const years = new Set<number>();
+        const sessions = new Set<number>();
         const subjects = new Set<string>();
         const certifications = new Set<string>();
         const topicsBySubject = new Map<string, Set<string>>();
         const subjectsByCert = new Map<string, Set<string>>();
         const yearsByCert = new Map<string, Set<number>>();
+        const sessionsByCert = new Map<string, Set<number>>();
         const yearsByCertSubject = new Map<string, Set<number>>();
         const topicsByCertSubject = new Map<string, Set<string>>();
         let offset = 0;
@@ -168,7 +216,7 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
         while (true) {
             const { data, error } = await supabase
                 .from('questions')
-                .select('year,subject,topic_category,certification')
+                .select('year,exam_session,subject,topic_category,certification')
                 .order('id', { ascending: true })
                 .range(offset, offset + batchSize - 1);
 
@@ -186,6 +234,7 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
                 const topicValue = normalizeKey(row.topic_category);
 
                 if (row.year) years.add(row.year);
+                if (row.exam_session) sessions.add(row.exam_session);
                 if (subjectValue) {
                     subjects.add(subjectValue);
                     if (topicValue) {
@@ -208,6 +257,12 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
                             yearsByCert.set(certificationValue, new Set());
                         }
                         yearsByCert.get(certificationValue)!.add(row.year);
+                    }
+                    if (row.exam_session) {
+                        if (!sessionsByCert.has(certificationValue)) {
+                            sessionsByCert.set(certificationValue, new Set());
+                        }
+                        sessionsByCert.get(certificationValue)!.add(row.exam_session);
                     }
                     if (subjectValue && row.year) {
                         const key = `${certificationValue}::${subjectValue}`;
@@ -233,6 +288,7 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
         const globalSubjectOrderMap = buildSubjectOrderMap();
 
         setAvailableYears(Array.from(years).sort((a, b) => b - a));
+        setAvailableExamSessions(Array.from(sessions).sort((a, b) => a - b));
         setAvailableSubjects(sortSubjectsByOrder(Array.from(subjects), globalSubjectOrderMap));
         setAvailableCertifications(Array.from(certifications).sort((a, b) => a.localeCompare(b)));
 
@@ -255,6 +311,12 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
         });
         setYearsByCertification(yearsByCertRecord);
 
+        const sessionsByCertRecord: Record<string, number[]> = {};
+        sessionsByCert.forEach((sessionSet, cert) => {
+            sessionsByCertRecord[cert] = Array.from(sessionSet).sort((a, b) => a - b);
+        });
+        setSessionsByCertification(sessionsByCertRecord);
+
         const yearsByCertSubjectRecord: Record<string, number[]> = {};
         yearsByCertSubject.forEach((yearSet, key) => {
             yearsByCertSubjectRecord[key] = Array.from(yearSet).sort((a, b) => b - a);
@@ -268,6 +330,87 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
         setTopicsByCertificationSubject(topicsByCertSubjectRecord);
     }, []);
 
+    const mapAnswerCharToIndex = (value?: string): number | null => {
+        const normalized = (value ?? '').trim();
+        if (normalized === '가') return 0;
+        if (normalized === '나') return 1;
+        if (normalized === '다') return 2;
+        if (normalized === '라') return 3;
+        return null;
+    };
+
+    const formatAnswerIndex = (value: number): string => {
+        const options = ['가', '나', '다', '라'];
+        return options[value] ?? '-';
+    };
+
+    const extractQuestionNumber = (text: string): number | null => {
+        const match = text.match(/^\s*(\d{1,3})\s*[.)]/);
+        if (!match) return null;
+        const parsed = parseInt(match[1], 10);
+        return Number.isNaN(parsed) ? null : parsed;
+    };
+
+    const fetchImageAsDataUrl = async (url: string): Promise<string> => {
+        const response = await fetch(url);
+        const blob = await response.blob();
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result as string);
+            reader.onerror = reject;
+            reader.readAsDataURL(blob);
+        });
+    };
+
+    const buildMismatchList = async (answers: AnswerSheetEntry[]) => {
+        const yearValue = filterYear ? parseInt(filterYear, 10) : NaN;
+        const sessionValue = filterExamSession ? parseInt(filterExamSession, 10) : NaN;
+
+        if (Number.isNaN(yearValue) || Number.isNaN(sessionValue)) {
+            setError('연도와 회차를 선택해주세요.');
+            return;
+        }
+
+        const questionsForCompare = await quizApi.loadQuestions({
+            year: yearValue,
+            examSession: sessionValue,
+            certification: filterCertification || undefined
+        });
+
+        const normalizedQuestions: ManagedQuestion[] = questionsForCompare.map(question => ({
+            ...question,
+            normalizedSubject: normalizeSubjectValue(question.subject),
+            normalizedTopic: normalizeTopicValue(question.topicCategory)
+        }));
+
+        const answersByNumber = new Map<number, number>();
+        answers.forEach(entry => {
+            const index = mapAnswerCharToIndex(entry.answer);
+            if (index !== null) {
+                answersByNumber.set(entry.question_number, index);
+            }
+        });
+
+        const mismatches: AnswerMismatch[] = [];
+        normalizedQuestions.forEach(question => {
+            const questionNumber = extractQuestionNumber(question.questionText);
+            if (!questionNumber) return;
+            const expectedIndex = answersByNumber.get(questionNumber);
+            if (expectedIndex === undefined) return;
+            if (question.answerIndex !== expectedIndex) {
+                mismatches.push({
+                    questionId: question.id,
+                    questionNumber,
+                    expectedIndex,
+                    currentIndex: question.answerIndex,
+                    question
+                });
+            }
+        });
+
+        setAnswerMismatches(mismatches);
+    };
+
     // Initial load and reload when filters change
     useEffect(() => {
         loadQuestions();
@@ -277,23 +420,119 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
         loadFilterOptions();
     }, [loadFilterOptions]);
 
+
     // Local filtering (Search and Year)
     const displayQuestions = questions;
 
     // Reset page when search or server-side filters change
     useEffect(() => {
         setCurrentPage(1);
-    }, [filterCertification, filterSubject, filterYear, filterTopic, searchText]);
+    }, [filterCertification, filterSubject, filterYear, filterExamSession, filterTopic, searchText]);
 
     useEffect(() => {
         setScrollTop(0);
     }, [currentPage]);
 
+    const handleAnswerSheetUpload = async () => {
+        if (!answerSheetFile) {
+            setError('정답표 이미지를 선택해주세요.');
+            return;
+        }
+        setError(null);
+        setSuccessMessage(null);
+        setIsParsingAnswerSheet(true);
+        try {
+            const parsed = await parseAnswerSheetFromImage(answerSheetFile);
+            setAnswerSheetAnswers(parsed);
+            await buildMismatchList(parsed);
+            setSuccessMessage(`정답표 인식 완료: ${parsed.length}개 항목`);
+        } catch (err) {
+            console.error(err);
+            setError('정답표 인식에 실패했습니다.');
+        } finally {
+            setIsParsingAnswerSheet(false);
+        }
+    };
+
+    const handleSolveMismatches = async () => {
+        if (answerMismatches.length === 0) {
+            setError('불일치 문제가 없습니다.');
+            return;
+        }
+        setError(null);
+        setIsSolvingMismatches(true);
+        const updates: PendingUpdate[] = [];
+        for (const mismatch of answerMismatches) {
+            const { question } = mismatch;
+            try {
+                let solved;
+                if (question.diagramUrl) {
+                    const dataUrl = await fetchImageAsDataUrl(question.diagramUrl);
+                    solved = await generateExplanationForAnswer(question, mismatch.expectedIndex, dataUrl);
+                } else {
+                    solved = await generateExplanationForAnswer(question, mismatch.expectedIndex);
+                }
+                updates.push({
+                    questionId: mismatch.questionId,
+                    questionNumber: mismatch.questionNumber,
+                    expectedIndex: mismatch.expectedIndex,
+                    currentIndex: mismatch.currentIndex,
+                    newIndex: mismatch.expectedIndex,
+                    aiExplanation: preferNonEmptyText(solved.aiExplanation, question.aiExplanation),
+                    hint: preferNonEmptyText(solved.hint, question.hint),
+                    rationale: preferNonEmptyText(solved.rationale, question.rationale),
+                    diagram_info: solved.diagram_info ?? question.diagram_info
+                });
+            } catch (solveError) {
+                console.error('Re-solve failed:', solveError);
+            }
+        }
+        setPendingUpdates(updates);
+        setShowUpdatePreview(true);
+        setIsSolvingMismatches(false);
+    };
+
+    const applyPendingUpdates = async () => {
+        if (pendingUpdates.length === 0) {
+            setShowUpdatePreview(false);
+            return;
+        }
+        setIsConfirmingUpdates(true);
+        try {
+            for (const update of pendingUpdates) {
+                await quizApi.updateQuestion(update.questionId, {
+                    answerIndex: update.newIndex,
+                    aiExplanation: update.aiExplanation,
+                    hint: update.hint,
+                    rationale: update.rationale,
+                    diagram_info: update.diagram_info
+                });
+            }
+            setSuccessMessage(`정답 수정 완료: ${pendingUpdates.length}건`);
+            setPendingUpdates([]);
+            setShowUpdatePreview(false);
+            await loadQuestions();
+        } catch (err) {
+            console.error(err);
+            setError('정답 업데이트에 실패했습니다.');
+        } finally {
+            setIsConfirmingUpdates(false);
+        }
+    };
+
 
     // Get unique years
     const availableSubjectsForFilter = useMemo(() => {
         if (!filterCertification) return availableSubjects;
-        return subjectsByCertification[filterCertification] || [];
+
+        const fromData = subjectsByCertification[filterCertification] || [];
+        const fromConstants = (CERTIFICATION_SUBJECTS[filterCertification as keyof typeof CERTIFICATION_SUBJECTS] || [])
+            .map(subject => normalizeKey(subject))
+            .filter(Boolean);
+        const merged = Array.from(new Set([...fromData, ...fromConstants]));
+        const certOrderMap = buildCertificationSubjectOrderMap(filterCertification);
+
+        return sortSubjectsByOrder(merged, certOrderMap);
     }, [availableSubjects, filterCertification, subjectsByCertification]);
 
     const availableYearsForFilter = useMemo(() => {
@@ -306,6 +545,13 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
         }
         return availableYears;
     }, [availableYears, filterCertification, filterSubject, yearsByCertification, yearsByCertificationSubject]);
+
+    const availableSessionsForFilter = useMemo(() => {
+        if (filterCertification) {
+            return sessionsByCertification[filterCertification] || [];
+        }
+        return availableExamSessions;
+    }, [availableExamSessions, filterCertification, sessionsByCertification]);
 
     const availableTopics = useMemo(() => {
         if (!filterSubject) return [];
@@ -344,6 +590,7 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
             subject: question.normalizedSubject === '기타' ? '' : question.normalizedSubject,
             certification: question.certification,
             year: question.year,
+            examSession: question.examSession,
             topicCategory: question.normalizedTopic === '기타' ? '' : question.normalizedTopic
         });
     };
@@ -461,7 +708,7 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
             {/* Filters */}
             <div className="bg-slate-100 dark:bg-slate-700 p-4 rounded-lg space-y-4">
                 <h3 className="font-semibold text-slate-800 dark:text-slate-200">필터</h3>
-                <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-5 gap-4">
+                <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-6 gap-4">
                     <div>
                         <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">
                             자격증
@@ -471,6 +718,7 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
                             onChange={(e) => {
                                 setFilterCertification(e.target.value);
                                 setFilterSubject(''); // Reset subject when certification changes
+                                setFilterExamSession('');
                                 setFilterTopic(''); // Reset topic when certification changes
                             }}
                             className="w-full px-3 py-2 border border-slate-300 dark:border-slate-600 rounded-lg bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100"
@@ -519,6 +767,22 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
 
                     <div>
                         <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">
+                            회차
+                        </label>
+                        <select
+                            value={filterExamSession}
+                            onChange={(e) => setFilterExamSession(e.target.value)}
+                            className="w-full px-3 py-2 border border-slate-300 dark:border-slate-600 rounded-lg bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100"
+                        >
+                            <option value="">전체</option>
+                            {availableSessionsForFilter.map(session => (
+                                <option key={session} value={session}>{session}</option>
+                            ))}
+                        </select>
+                    </div>
+
+                    <div>
+                        <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">
                             주제
                         </label>
                         <select
@@ -557,6 +821,7 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
                             setFilterSubject('');
                             setFilterCertification('');
                             setFilterYear('');
+                            setFilterExamSession('');
                             setFilterTopic('');
                             setSearchText('');
                         }}
@@ -565,6 +830,72 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
                         필터 초기화
                     </button>
                 </div>
+            </div>
+
+            {/* Answer Sheet Comparison */}
+            <div className="bg-white dark:bg-slate-800 p-6 rounded-lg shadow space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                        <h3 className="text-lg font-semibold text-slate-800 dark:text-slate-200">정답표 비교</h3>
+                        <p className="text-sm text-slate-500 dark:text-slate-400">연도/회차 필터를 선택한 뒤 정답표 이미지를 업로드하세요.</p>
+                    </div>
+                    <button
+                        onClick={handleAnswerSheetUpload}
+                        disabled={isParsingAnswerSheet || !answerSheetFile}
+                        className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg disabled:opacity-50"
+                    >
+                        {isParsingAnswerSheet ? '인식 중...' : '정답표 분석'}
+                    </button>
+                </div>
+                <div className="flex flex-wrap items-center gap-3">
+                    <input
+                        type="file"
+                        accept="image/*"
+                        onChange={(e) => setAnswerSheetFile(e.target.files?.[0] || null)}
+                        className="text-sm text-slate-700 dark:text-slate-200"
+                    />
+                    {answerSheetAnswers.length > 0 && (
+                        <span className="text-sm text-slate-600 dark:text-slate-300">
+                            인식된 정답: {answerSheetAnswers.length}개
+                        </span>
+                    )}
+                </div>
+                <div className="flex flex-wrap items-center gap-4">
+                    <span className="text-sm text-slate-600 dark:text-slate-300">
+                        불일치: {answerMismatches.length}건
+                    </span>
+                    <button
+                        onClick={handleSolveMismatches}
+                        disabled={answerMismatches.length === 0 || isSolvingMismatches}
+                        className="bg-amber-600 hover:bg-amber-700 text-white px-4 py-2 rounded-lg disabled:opacity-50"
+                    >
+                        {isSolvingMismatches ? '재풀이 중...' : '불일치 재풀이'}
+                    </button>
+                </div>
+                {answerMismatches.length > 0 && (
+                    <div className="overflow-x-auto border border-slate-200 dark:border-slate-700 rounded-lg">
+                        <table className="w-full text-sm">
+                            <thead className="bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300">
+                                <tr>
+                                    <th className="px-3 py-2 text-left">문항</th>
+                                    <th className="px-3 py-2 text-left">기존</th>
+                                    <th className="px-3 py-2 text-left">정답표</th>
+                                    <th className="px-3 py-2 text-left">문제</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {answerMismatches.slice(0, 8).map(mismatch => (
+                                    <tr key={mismatch.questionId} className="border-t border-slate-200 dark:border-slate-700">
+                                        <td className="px-3 py-2">{mismatch.questionNumber}</td>
+                                        <td className="px-3 py-2">{formatAnswerIndex(mismatch.currentIndex)}</td>
+                                        <td className="px-3 py-2 font-semibold text-red-600">{formatAnswerIndex(mismatch.expectedIndex)}</td>
+                                        <td className="px-3 py-2 truncate max-w-xs">{mismatch.question.questionText.substring(0, 40)}...</td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                )}
             </div>
 
             {/* Question Table */}
@@ -584,6 +915,9 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
                                 </th>
                                 <th className="px-4 py-3 text-left text-xs font-medium text-slate-700 dark:text-slate-300 uppercase tracking-wider">
                                     연도
+                                </th>
+                                <th className="px-4 py-3 text-left text-xs font-medium text-slate-700 dark:text-slate-300 uppercase tracking-wider">
+                                    회차
                                 </th>
                                 <th className="px-4 py-3 text-left text-xs font-medium text-slate-700 dark:text-slate-300 uppercase tracking-wider">
                                     주제
@@ -643,6 +977,18 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
                                                 />
                                             ) : (
                                                 question.year
+                                            )}
+                                        </td>
+                                        <td className="px-4 py-3 text-sm text-slate-900 dark:text-slate-100">
+                                            {editingId === question.id ? (
+                                                <input
+                                                    type="number"
+                                                    value={editForm.examSession ?? ''}
+                                                    onChange={(e) => setEditForm({ ...editForm, examSession: parseInt(e.target.value) })}
+                                                    className="w-16 px-2 py-1 border rounded bg-white dark:bg-slate-700"
+                                                />
+                                            ) : (
+                                                question.examSession ?? '-'
                                             )}
                                         </td>
                                         <td className="px-4 py-3 text-sm text-slate-900 dark:text-slate-100">
@@ -757,7 +1103,7 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
                                     {paginatedQuestions.slice(startRow, endRow).map((question) => (
                                         <div
                                             key={question.id}
-                                            className="grid grid-cols-[80px_160px_160px_80px_160px_1fr_140px] border-b border-slate-200 dark:border-slate-600 text-sm text-slate-900 dark:text-slate-100"
+                                            className="grid grid-cols-[80px_160px_160px_80px_70px_160px_1fr_140px] border-b border-slate-200 dark:border-slate-600 text-sm text-slate-900 dark:text-slate-100"
                                             style={{ height: rowHeight }}
                                         >
                                             <div className="px-4 py-3">{question.id}</div>
@@ -768,6 +1114,7 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
                                                     : question.normalizedSubject}
                                             </div>
                                             <div className="px-4 py-3">{question.year}</div>
+                                            <div className="px-4 py-3">{question.examSession ?? '-'}</div>
                                             <div className="px-4 py-3">
                                                 {question.normalizedTopic === '기타' && question.topicCategory
                                                     ? `기타 (${question.topicCategory})`
@@ -879,6 +1226,67 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
             </div>
 
             {/* Question Detail Modal */}
+            {showUpdatePreview && (
+                <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 px-4 py-6">
+                    <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl w-full max-w-4xl max-h-[90vh] overflow-hidden border border-slate-200 dark:border-slate-700 flex flex-col">
+                        <header className="px-6 py-4 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between">
+                            <div>
+                                <h3 className="text-lg font-semibold text-slate-800 dark:text-slate-100">정답 변경 미리보기</h3>
+                                <p className="text-sm text-slate-500 dark:text-slate-400">
+                                    변경 예정: {pendingUpdates.length}건
+                                </p>
+                            </div>
+                            <button
+                                onClick={() => setShowUpdatePreview(false)}
+                                className="text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200"
+                            >
+                                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                                </svg>
+                            </button>
+                        </header>
+                        <div className="p-6 overflow-y-auto">
+                            <table className="w-full text-sm border border-slate-200 dark:border-slate-700">
+                                <thead className="bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300">
+                                    <tr>
+                                        <th className="px-3 py-2 text-left">문항</th>
+                                        <th className="px-3 py-2 text-left">기존</th>
+                                        <th className="px-3 py-2 text-left">정답표</th>
+                                        <th className="px-3 py-2 text-left">재풀이</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {pendingUpdates.map(update => (
+                                        <tr key={update.questionId} className="border-t border-slate-200 dark:border-slate-700">
+                                            <td className="px-3 py-2">{update.questionNumber}</td>
+                                            <td className="px-3 py-2">{formatAnswerIndex(update.currentIndex)}</td>
+                                            <td className="px-3 py-2 text-red-600">{formatAnswerIndex(update.expectedIndex)}</td>
+                                            <td className="px-3 py-2 text-green-600 font-semibold">{formatAnswerIndex(update.newIndex)}</td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                        <footer className="px-6 py-4 border-t border-slate-200 dark:border-slate-700 flex justify-end gap-3">
+                            <button
+                                onClick={() => setShowUpdatePreview(false)}
+                                className="px-4 py-2 rounded-lg border border-slate-300 dark:border-slate-600 text-slate-600 dark:text-slate-300"
+                                disabled={isConfirmingUpdates}
+                            >
+                                취소
+                            </button>
+                            <button
+                                onClick={applyPendingUpdates}
+                                className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white disabled:opacity-50"
+                                disabled={isConfirmingUpdates}
+                            >
+                                {isConfirmingUpdates ? '저장 중...' : '저장'}
+                            </button>
+                        </footer>
+                    </div>
+                </div>
+            )}
+
             {selectedQuestion && (
                 <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
                     <div className="bg-white dark:bg-slate-800 rounded-lg shadow-xl max-w-3xl w-full max-h-[90vh] overflow-y-auto">
@@ -899,7 +1307,7 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
 
                             <div className="space-y-4">
                                 {/* Metadata */}
-                                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 p-4 bg-slate-100 dark:bg-slate-700 rounded-lg">
+                                <div className="grid grid-cols-2 md:grid-cols-5 gap-3 p-4 bg-slate-100 dark:bg-slate-700 rounded-lg">
                                     <div>
                                         <p className="text-xs text-slate-600 dark:text-slate-400">ID</p>
                                         <p className="font-semibold text-slate-900 dark:text-slate-100">{selectedQuestion.id}</p>
@@ -915,6 +1323,10 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
                                     <div>
                                         <p className="text-xs text-slate-600 dark:text-slate-400">연도</p>
                                         <p className="font-semibold text-slate-900 dark:text-slate-100">{selectedQuestion.year}</p>
+                                    </div>
+                                    <div>
+                                        <p className="text-xs text-slate-600 dark:text-slate-400">회차</p>
+                                        <p className="font-semibold text-slate-900 dark:text-slate-100">{selectedQuestion.examSession ?? '-'}</p>
                                     </div>
                                 </div>
 
