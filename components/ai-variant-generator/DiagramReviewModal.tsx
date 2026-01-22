@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { QuestionModel } from '../../types';
 import { PagePreview, SubjectProcessingPackage } from './utils';
+import { analyzeQuestionStructureFromImage } from '../../services/geminiService';
 
 type DiagramBounds = { x: number; y: number; width: number; height: number; };
 type DragHandle = 'move' | 'nw' | 'ne' | 'sw' | 'se';
@@ -141,6 +142,8 @@ const DiagramReviewModal: React.FC<DiagramReviewModalProps> = ({
 
     const [dragState, setDragState] = useState<DragState | null>(null);
     const [naturalSizes, setNaturalSizes] = useState<Map<number, { width: number; height: number }>>(() => new Map());
+    const [structureLogged, setStructureLogged] = useState(false);
+    const [structureCache, setStructureCache] = useState<Map<string, QuestionModel['structureAnalysis']>>(() => new Map());
 
     const activeItem = reviewItems[activeIndex] || reviewItems[0];
     const activeBounds = activeItem ? boundsByQuestion.get(activeItem.questionIndex) || activeItem.info.bounds : null;
@@ -168,6 +171,33 @@ const DiagramReviewModal: React.FC<DiagramReviewModalProps> = ({
             return next;
         });
     };
+
+    useEffect(() => {
+        if (!activeItem || !previewSrc || structureLogged) return;
+        const runStructureLog = async () => {
+            try {
+                const cacheKey = `${activeItem.questionIndex}-${activeItem.question.questionText}`;
+                const cached = structureCache.get(cacheKey);
+                if (cached) {
+                    console.log('[structure]', cached);
+                    setStructureLogged(true);
+                    return;
+                }
+                const structure = await analyzeQuestionStructureFromImage(activeItem.question, previewSrc);
+                console.log('[structure]', structure);
+                setStructureCache(prev => {
+                    const next = new Map(prev);
+                    next.set(cacheKey, structure);
+                    return next;
+                });
+                setStructureLogged(true);
+            } catch (error) {
+                console.error('Structure log failed:', error);
+                setStructureLogged(true);
+            }
+        };
+        void runStructureLog();
+    }, [activeItem, previewSrc, structureLogged]);
 
     const startDrag = (handle: DragHandle, event: React.MouseEvent) => {
         if (!activeItem || !activeBounds || !naturalSizes.get(activeItem.info.pageIndex)) return;

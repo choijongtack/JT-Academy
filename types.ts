@@ -22,6 +22,16 @@ export interface QuestionModel {
   frequency?: number;                // Auto-calculated appearance count
   difficultyLevel?: 'easy' | 'medium' | 'hard' | '상' | '중' | '하';
 
+  // Problem classification (rule-based)
+  problemType?: 'diagram' | 'table_graph' | 'calculation' | 'concept' | 'definition' | 'unknown';
+  solveRoute?: 'diagram-llm' | 'text-llm' | 'code-verify';
+  requiredSignals?: string[];
+
+  // Structure pipeline metadata (not stored in DB)
+  structureAnalysis?: QuestionStructureAnalysis;
+  problemClass?: ProblemClass;
+  solveInput?: StructuredSolveInput;
+
   // Supabase Storage URLs
   imageUrl?: string;                // URL to original question image in Storage
   textFileUrl?: string;             // URL to extracted text file in Storage
@@ -54,7 +64,54 @@ export interface QuestionModel {
     description: string;            // Topology description
     topology: string;               // e.g., "series", "parallel"
   } | null;
+
+  ingestionJobId?: number;
 }
+
+export type DiagramType = 'CIRCUIT' | 'GEOMETRY' | 'FLUX' | 'UNKNOWN';
+
+export interface QuestionStructureAnalysis {
+  question_text_raw: string;
+  has_diagram: boolean;
+  diagram_type: DiagramType;
+  diagram_elements: string[];
+  unknowns: string[];
+  given_values: string[];
+}
+
+export type ProblemClass =
+  | 'CIRCUIT_SERIES_PARALLEL'
+  | 'FLUX_SOLID_ANGLE'
+  | 'GEOMETRY_PROJECTION'
+  | 'UNKNOWN';
+
+export type StructuredSolveInput =
+  | {
+    type: 'CIRCUIT_SERIES_PARALLEL';
+    battery?: {
+      voltage?: number;
+      capacity?: number;
+    };
+    series_per_string?: number;
+    parallel_strings?: number;
+    raw_tokens?: string[];
+  }
+  | {
+    type: 'FLUX_SOLID_ANGLE';
+    monopole_strength?: string;
+    loop_radius?: string;
+    positions?: string[];
+    angles?: {
+      theta1?: string;
+      theta2?: string;
+    };
+    time?: string;
+    raw_tokens?: string[];
+  }
+  | {
+    type: 'GEOMETRY_PROJECTION' | 'UNKNOWN';
+    raw_tokens?: string[];
+  };
 
 export interface UserQuizRecord {
   userId?: string;
@@ -94,7 +151,7 @@ export interface TopicStats {
   averageAccuracy?: number;     // Optional: user performance
 }
 
-export type Screen = 'dashboard' | 'quiz' | 'wrong-note' | 'subject-select' | 'ai-variant-generator' | 'admin-questions';
+export type Screen = 'dashboard' | 'quiz' | 'wrong-note' | 'subject-select' | 'ai-variant-generator' | 'admin-questions' | 'course-routine';
 
 export type AuthSession = Session;
 

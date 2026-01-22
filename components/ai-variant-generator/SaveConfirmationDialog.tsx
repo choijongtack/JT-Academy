@@ -16,6 +16,17 @@ interface SaveConfirmationDialogProps {
     yearError: string | null;
     shouldShowYearError: boolean;
     handleSaveCurrentSubject: () => void;
+    handleSaveDiagramOnly: () => void;
+    isDiagramOnlyMode: boolean;
+    diagramMatchPreview: Array<{
+        index: number;
+        questionNumber: number | null;
+        subject: string;
+        year: number | null;
+        examSession: number | null;
+        textPreview: string;
+        matchStatus: 'ready' | 'no-subject' | 'no-number' | 'not-found';
+    }>;
     onNext: () => void;
     onCancel: () => void;
 }
@@ -35,6 +46,9 @@ const SaveConfirmationDialog: React.FC<SaveConfirmationDialogProps> = ({
     yearError,
     shouldShowYearError,
     handleSaveCurrentSubject,
+    handleSaveDiagramOnly,
+    isDiagramOnlyMode,
+    diagramMatchPreview,
     onNext,
     onCancel,
 }) => {
@@ -47,6 +61,8 @@ const SaveConfirmationDialog: React.FC<SaveConfirmationDialogProps> = ({
         !pendingSubjectPackage ||
         !isYearValid ||
         (requiresDiagramReview && !isDiagramReviewComplete);
+    const saveHandler = isDiagramOnlyMode ? handleSaveDiagramOnly : handleSaveCurrentSubject;
+    const saveLabel = isDiagramOnlyMode ? 'diagram_url 업데이트' : 'Supabase로 저장';
 
     return (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 px-4">
@@ -129,7 +145,7 @@ const SaveConfirmationDialog: React.FC<SaveConfirmationDialogProps> = ({
                         </p>
                         <div className="flex flex-col gap-3">
                             <button
-                                onClick={handleSaveCurrentSubject}
+                                onClick={saveHandler}
                                 disabled={isSaveDisabled}
                                 className={`px-4 py-3 rounded-xl font-semibold text-sm transition-colors shadow ${isSaveDisabled
                                     ? 'bg-slate-200 text-slate-500 cursor-not-allowed dark:bg-slate-700 dark:text-slate-400'
@@ -137,7 +153,7 @@ const SaveConfirmationDialog: React.FC<SaveConfirmationDialogProps> = ({
                                 }`}
                                 type="button"
                             >
-                                {isBatchConfirmed ? '저장 완료' : isSavingSubject ? 'Supabase 저장 중...' : 'Supabase로 저장'}
+                                {isBatchConfirmed ? '저장 완료' : isSavingSubject ? 'Supabase 저장 중...' : saveLabel}
                             </button>
                             {!isBatchConfirmed && !isSavingSubject && (
                                 <p className="text-xs text-slate-500 dark:text-slate-400">
@@ -157,7 +173,45 @@ const SaveConfirmationDialog: React.FC<SaveConfirmationDialogProps> = ({
                         </div>
                     </div>
 
-                    <div className="flex gap-3">
+                    
+                    {diagramMatchPreview.length > 0 && (
+                        <div className="p-4 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900">
+                            <p className="text-sm font-semibold text-slate-800 dark:text-slate-100 mb-3">
+                                다이어그램 매칭 프리뷰
+                            </p>
+                            <div className="space-y-2 max-h-48 overflow-y-auto pr-1 text-xs">
+                                {diagramMatchPreview.map(item => (
+                                    <div
+                                        key={`${item.index}-${item.questionNumber ?? 'na'}`}
+                                        className="flex flex-col gap-1 border border-slate-200 dark:border-slate-700 rounded-md px-3 py-2"
+                                    >
+                                        <div className="flex items-center justify-between">
+                                            <span className="font-semibold text-slate-700 dark:text-slate-200">
+                                                #{item.questionNumber ?? '-'} ? {item.subject || '(?? ??)'}
+                                            </span>
+                                            <span className="text-slate-500 dark:text-slate-400">
+                                                {item.year ?? '-'} / {item.examSession ?? '-'}
+                                            </span>
+                                        </div>
+                                        <div className="text-slate-500 dark:text-slate-400">
+                                            {item.textPreview || '(?? ??? ??)'}
+                                        </div>
+                                        <div className={`text-xs font-semibold ${item.matchStatus === 'ready'
+                                            ? 'text-green-600'
+                                            : item.matchStatus === 'not-found'
+                                                ? 'text-red-600'
+                                                : 'text-amber-600'
+                                            }`}
+                                        >
+                                            {item.matchStatus}
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    )}
+
+<div className="flex gap-3">
                         <button
                             onClick={onNext}
                             disabled={!isBatchConfirmed}

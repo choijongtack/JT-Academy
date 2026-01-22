@@ -6,6 +6,7 @@ import WrongNoteScreen from './components/WrongNoteScreen';
 import SubjectSelectionScreen from './components/SubjectSelectionScreen';
 import CourseRoutineScreen from './components/CourseRoutineScreen';
 import AiVariantGeneratorScreen from './components/AiVariantGeneratorScreen';
+
 import AdminQuestionManagementScreen from './components/AdminQuestionManagementScreen';
 import LandingScreen from './components/LandingScreen';
 import AuthScreen from './components/AuthScreen';
@@ -381,6 +382,7 @@ const App: React.FC = () => {
       case 'ai-variant-generator':
         return <AiVariantGeneratorScreen navigate={navigate} session={session} certification={selectedCertification} onQuestionsUpdated={() => {
         }} />;
+
       case 'admin-questions':
         return <AdminQuestionManagementScreen navigate={navigate} session={session} />;
       case 'course-routine':
@@ -511,6 +513,7 @@ const App: React.FC = () => {
                 </svg>
                 문제 UPLOAD
               </button>
+
             </>
           )}
           <span className={`text-slate-600 dark:text-slate-300${isMobile ? ' hidden' : ''}`}>

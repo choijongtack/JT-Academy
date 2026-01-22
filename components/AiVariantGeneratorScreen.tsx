@@ -89,13 +89,19 @@ const AiVariantGeneratorScreen: React.FC<AiVariantGeneratorScreenProps> = ({ nav
         statusMessage,
         error,
         handleProcessStart,
+        handleProcessStartWithMode,
         handleSaveCurrentSubject,
+        handleSaveDiagramOnly,
         extractedQuestions,
         updateExtractedQuestion,
         generatedVariants,
         previewImages,
+        isDiagramOnlyMode,
         isManualReviewOpen,
-        setIsManualReviewOpen
+        setIsManualReviewOpen,
+        lastVerificationSummary,
+        diagramUpdateWarning,
+        diagramMatchPreview
     } = useAiProcessing({
         certification,
         selectedSubject,
@@ -157,6 +163,64 @@ const AiVariantGeneratorScreen: React.FC<AiVariantGeneratorScreenProps> = ({ nav
                     {error}
                 </div>
             )}
+            {diagramUpdateWarning && (
+                <div className="bg-amber-50 dark:bg-amber-900/30 p-4 rounded-lg border border-amber-200 dark:border-amber-700 text-amber-800 dark:text-amber-200">
+                    {diagramUpdateWarning}
+                </div>
+            )}
+            {diagramMatchPreview.length > 0 && (
+                <div className="bg-white dark:bg-slate-900 p-4 rounded-lg border border-slate-200 dark:border-slate-700">
+                    <div className="text-sm font-semibold text-slate-700 dark:text-slate-200 mb-2">
+                        다이어그램 매칭 프리뷰
+                    </div>
+                    <div className="grid gap-2 text-xs">
+                        {diagramMatchPreview.map(item => (
+                            <div
+                                key={`${item.index}-${item.questionNumber ?? 'na'}`}
+                                className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 rounded-md border border-slate-200 dark:border-slate-700 px-3 py-2"
+                            >
+                                <div className="flex-1">
+                                    <div className="font-semibold text-slate-700 dark:text-slate-200">
+                                        #{item.questionNumber ?? '-'} · {item.subject || '(과목 없음)'}
+                                    </div>
+                                    <div className="text-slate-500 dark:text-slate-400">
+                                        {item.textPreview || '(문항 텍스트 없음)'}
+                                    </div>
+                                </div>
+                                <div className="text-slate-500 dark:text-slate-400">
+                                    {item.year ?? '-'} / {item.examSession ?? '-'}
+                                </div>
+                                <div className={`text-xs font-semibold ${item.matchStatus === 'ready'
+                                    ? 'text-green-600'
+                                    : item.matchStatus === 'not-found'
+                                        ? 'text-red-600'
+                                        : 'text-amber-600'
+                                    }`}
+                                >
+                                    {item.matchStatus}
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            )}
+            {lastVerificationSummary && (
+                <div className="bg-emerald-50 dark:bg-emerald-900/30 p-4 rounded-lg border border-emerald-200 dark:border-emerald-700 text-emerald-700 dark:text-emerald-200">
+                    <div className="font-semibold">
+                        검증 요약: {lastVerificationSummary.subject}
+                    </div>
+                    <div className="text-sm">
+                        Verified: {lastVerificationSummary.verifiedCount} / Needs review: {lastVerificationSummary.needsReviewCount}
+                    </div>
+                    {lastVerificationSummary.needsReviewCount > 0 && (
+                        <div className="text-sm mt-1">
+                            {Object.entries(lastVerificationSummary.reasons)
+                                .map(([reason, count]) => `${reason} (${count})`)
+                                .join(', ')}
+                        </div>
+                    )}
+                </div>
+            )}
 
             {/* Save Confirmation Dialog */}
             {isPaused && (!requiresDiagramReview || isDiagramReviewComplete) && (
@@ -175,6 +239,9 @@ const AiVariantGeneratorScreen: React.FC<AiVariantGeneratorScreenProps> = ({ nav
                     yearError={yearError}
                     shouldShowYearError={shouldShowYearError}
                     handleSaveCurrentSubject={handleSaveCurrentSubject}
+                    handleSaveDiagramOnly={handleSaveDiagramOnly}
+                    isDiagramOnlyMode={isDiagramOnlyMode}
+                    diagramMatchPreview={diagramMatchPreview}
                     onNext={() => {
                         setIsPaused(false);
                         if (!selectedSubject) {
@@ -345,12 +412,27 @@ const AiVariantGeneratorScreen: React.FC<AiVariantGeneratorScreenProps> = ({ nav
                 {/* 4. Action Button */}
                 <div className="mt-8">
                     <button
-                        onClick={handleProcessStart}
+                        onClick={() => handleProcessStartWithMode(false)}
                         disabled={isProcessing || selectedFiles.length === 0}
                         className="w-full py-4 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white font-bold rounded-xl shadow-lg disabled:opacity-50 disabled:cursor-not-allowed transition-all transform active:scale-[0.99] text-lg"
                     >
                         {isProcessing ? 'AI 분석 및 문제 추출 중...' : '문제 추출 시작'}
                     </button>
+                    <div className="mt-4 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 px-4 py-3 text-left space-y-3">
+                        <div className="text-sm font-semibold text-slate-700 dark:text-slate-200">
+                            다이어그램만 업로드
+                        </div>
+                        <button
+                            onClick={() => handleProcessStartWithMode(true)}
+                            disabled={isProcessing || selectedFiles.length === 0}
+                            className="w-full py-3 rounded-xl font-semibold text-white bg-amber-600 hover:bg-amber-700 disabled:bg-amber-300 disabled:cursor-not-allowed"
+                        >
+                            {isProcessing ? '다이어그램 준비 중...' : '다이어그램만 업로드'}
+                        </button>
+                        <p className="text-xs text-slate-500 dark:text-slate-400">
+                            기존 문제와 매칭하여 diagram_url만 업데이트합니다.
+                        </p>
+                    </div>
                 </div>
 
                 {/* 5. Preview of Recognized Pages */}

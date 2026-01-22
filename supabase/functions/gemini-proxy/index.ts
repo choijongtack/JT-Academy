@@ -1,6 +1,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { GoogleGenerativeAI } from "npm:@google/generative-ai";
 import OpenAI from "npm:openai";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 const DEFAULT_GEMINI_MODEL = "gemini-2.5-flash";
 const OPENAI_FALLBACK_MODEL = "gpt-4o-mini";
@@ -8,6 +9,17 @@ const OPENAI_FALLBACK_MODEL = "gpt-4o-mini";
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+};
+
+const getSupabaseClient = () => {
+  const url = Deno.env.get('SUPABASE_URL');
+  const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+  const anonKey = Deno.env.get('SUPABASE_ANON_KEY');
+  const key = serviceRoleKey || anonKey;
+  if (!url || !key) {
+    throw new Error('SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY is not set');
+  }
+  return createClient(url, key, { auth: { persistSession: false } });
 };
 
 const isOpenAiModel = (model?: string) => {
@@ -156,6 +168,60 @@ serve(async (req) => {
     let warning: string | null = null;
 
     switch (action) {
+      case 'ingestionStart': {
+        const supabase = getSupabaseClient();
+        const payloadBody = payload || {};
+        const {
+          certification,
+          subject,
+          year,
+          exam_session,
+          source,
+          request_payload,
+          structure_analysis,
+          problem_class,
+          solve_input,
+          solver_output,
+          verification_result,
+          failure_reason,
+          status
+        } = payloadBody;
+
+        let derivedStatus = status || 'RECEIVED';
+        if (!status) {
+          if (verification_result) derivedStatus = 'VERIFIED';
+          else if (solver_output) derivedStatus = 'SOLVED';
+          else if (problem_class || solve_input) derivedStatus = 'CLASSIFIED';
+          else if (structure_analysis) derivedStatus = 'STRUCTURED';
+        }
+
+        const { data, error } = await supabase
+          .from('ingestion_jobs')
+          .insert({
+            certification,
+            subject,
+            year,
+            exam_session,
+            source,
+            request_payload,
+            structure_analysis,
+            problem_class,
+            solve_input,
+            solver_output,
+            verification_result,
+            failure_reason,
+            status: derivedStatus
+          })
+          .select('id,status')
+          .single();
+
+        if (error) {
+          throw new Error(error.message || 'Failed to create ingestion job');
+        }
+
+        result = data;
+        break;
+      }
       case 'generateContent': {
         // Generic content generation
         const { model, prompt, schema, imageParts } = payload;

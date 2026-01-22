@@ -1,6 +1,7 @@
 import { supabase } from './supabaseClient';
 
 const STORAGE_BUCKET = 'exam-assets';
+const DIAGRAM_STORAGE_BUCKET = 'elec_exam_dia';
 
 /**
  * Upload a file to Supabase Storage
@@ -25,6 +26,26 @@ export const uploadToStorage = async (file: File | Blob, path: string): Promise<
     // Get public URL
     const { data: { publicUrl } } = supabase.storage
         .from(STORAGE_BUCKET)
+        .getPublicUrl(data.path);
+
+    return publicUrl;
+};
+
+const uploadToDiagramStorage = async (file: File | Blob, path: string): Promise<string> => {
+    const { data, error } = await supabase.storage
+        .from(DIAGRAM_STORAGE_BUCKET)
+        .upload(path, file, {
+            cacheControl: '3600',
+            upsert: false
+        });
+
+    if (error) {
+        console.error('Diagram storage upload error:', error);
+        throw new Error(`Failed to upload diagram file: ${error.message}`);
+    }
+
+    const { data: { publicUrl } } = supabase.storage
+        .from(DIAGRAM_STORAGE_BUCKET)
         .getPublicUrl(data.path);
 
     return publicUrl;
@@ -85,7 +106,18 @@ export const uploadDiagramImage = async (base64Image: string, filename: string):
     const blob = new Blob([byteArray], { type: 'image/jpeg' });
 
     const path = `diagrams/${filename}`;
-    return uploadToStorage(blob, path);
+    return uploadToDiagramStorage(blob, path);
+};
+
+/**
+ * Upload diagram file to Supabase Storage
+ * @param file - Diagram file (image)
+ * @param filename - Filename to use (e.g., 'uuid.jpg')
+ * @returns Public URL of the uploaded diagram image
+ */
+export const uploadDiagramFile = async (file: File | Blob, filename: string): Promise<string> => {
+    const path = `diagrams/${filename}`;
+    return uploadToDiagramStorage(file, path);
 };
 
 /**

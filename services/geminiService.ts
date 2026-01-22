@@ -1,6 +1,6 @@
 ﻿/// <reference types="vite/client" />
 
-import { QuestionModel, AnalyzedQuestionResponse, GeneratedVariantProblem } from "../types";
+import { QuestionModel, AnalyzedQuestionResponse, GeneratedVariantProblem, QuestionStructureAnalysis } from "../types";
 import { SUBJECT_TOPICS, CERTIFICATION_SUBJECTS, TOPIC_KEYWORD_OVERRIDES } from "../constants";
 import { supabase } from "./supabaseClient";
 import { DEFAULT_LLM_MODEL, getStoredLlmModel } from "../utils/llmSettings";
@@ -557,7 +557,7 @@ export const analyzeQuestionsFromImages = async (images: string[], subjectHint?:
 
             processedQ.topicCategory = resolveTopicCategory(processedQ, processedQ.topicCategory);
 
-            // 2. STRICT Diagram Filtering
+            // 2. STRICT Diagram Filtering (image mode matches PDF behavior)
             const diagramKeywords = ["그림", "다음 그림", "아래 그림", "회로도", "결선도"];
             const hasKeyword = diagramKeywords.some(keyword => processedQ.questionText.includes(keyword));
 
@@ -565,7 +565,7 @@ export const analyzeQuestionsFromImages = async (images: string[], subjectHint?:
                 console.log(`[Rule-Based] Question ${match ? match[1] : 'unknown'}: Removed false positive diagram (No keywords found).`);
                 processedQ.diagramBounds = undefined;
             }
-            if (!processedQ.diagramBounds && hasKeyword) {
+            if (hasKeyword && !processedQ.diagramBounds) {
                 processedQ.needsManualDiagram = true;
             }
 
@@ -687,6 +687,77 @@ export const solveQuestionWithDiagram = async (
     } catch (error) {
         console.error("Error solving question with diagram:", error);
         throw new Error("Failed to re-analyze the question with the provided diagram.");
+    }
+};
+
+
+
+export const analyzeQuestionStructureFromImage = async (
+    question: Pick<QuestionModel, 'questionText' | 'options' | 'subject'>,
+    diagramImageBase64: string
+): Promise<QuestionStructureAnalysis> => {
+    const cleanBase64 = diagramImageBase64.includes('base64,')
+        ? diagramImageBase64.split('base64,')[1]
+        : diagramImageBase64;
+    const imagePart = {
+        inlineData: {
+            data: cleanBase64,
+            mimeType: "image/jpeg"
+        }
+    };
+
+    const schema = {
+        type: "OBJECT",
+        properties: {
+            question_text_raw: { type: "STRING" },
+            has_diagram: { type: "BOOLEAN" },
+            diagram_type: { type: "STRING" },
+            diagram_elements: { type: "ARRAY", items: { type: "STRING" } },
+            unknowns: { type: "ARRAY", items: { type: "STRING" } },
+            given_values: { type: "ARRAY", items: { type: "STRING" } }
+        },
+        required: ["question_text_raw", "has_diagram", "diagram_type", "diagram_elements", "unknowns", "given_values"]
+    };
+
+    const prompt = `
+You are extracting ONLY the structure of a diagram-based question.
+Do NOT solve the problem. Do NOT include any answer, formula, or explanation.
+
+Return ONLY a strict JSON object that matches the schema.
+
+Constraints:
+1. diagram_type must be one of: "CIRCUIT", "GEOMETRY", "FLUX", "UNKNOWN".
+2. diagram_elements should list concrete items visible in the diagram.
+3. unknowns should list what the question is asking for.
+4. given_values should list values/symbols given in the text or diagram (keep units if shown).
+
+Question context:
+- Subject: ${question.subject ?? ''}
+- Text: ${question.questionText ?? ''}
+- Options: ${Array.isArray(question.options) ? JSON.stringify(question.options) : '[]'}
+`;
+
+    try {
+        const { data, error } = await supabase.functions.invoke('gemini-proxy', {
+            body: {
+                action: 'analyzeImage',
+                payload: {
+                    prompt,
+                    imageParts: [imagePart],
+                    schema,
+                    model: resolveSelectedModel()
+                }
+            }
+        });
+
+        return unwrapFunctionResponse<QuestionStructureAnalysis>(
+            data,
+            error,
+            'Failed to analyze question structure.'
+        );
+    } catch (error) {
+        console.error('Structure analysis error:', error);
+        throw new Error('Failed to analyze question structure.');
     }
 };
 
@@ -890,7 +961,11 @@ export const solveQuestionFromText = async (
 export const generateExplanationForAnswer = async (
     question: QuestionModel,
     answerIndex: number,
-    diagramImageBase64?: string
+    diagramImageBase64?: string,
+    context?: {
+        structureAnalysis?: QuestionStructureAnalysis | null;
+        diagramInfo?: QuestionModel['diagram_info'] | null;
+    }
 ): Promise<{
     aiExplanation: string;
     hint: string;
@@ -935,6 +1010,13 @@ export const generateExplanationForAnswer = async (
     };
 
     const correctOption = Array.isArray(question.options) ? question.options[answerIndex] : undefined;
+    const structureContext = context?.structureAnalysis
+        ? `\n\nStructure Analysis:\n${JSON.stringify(context.structureAnalysis)}`
+        : '';
+    const diagramContext = context?.diagramInfo
+        ? `\n\nDiagram Info:\n${JSON.stringify(context.diagramInfo)}`
+        : '';
+
     const prompt = `
         You are a professional Electrical Engineering tutor.
         The correct answer is fixed by the official answer sheet.
@@ -954,6 +1036,7 @@ export const generateExplanationForAnswer = async (
         2. Provide a concise hint in Korean.
         3. If a diagram image is provided, incorporate it and extract diagram_info.
         4. Output ONLY a strict JSON object matching the schema.
+        ${structureContext}${diagramContext}
     `;
 
     const requestExplanation = async (modelName: string) => {

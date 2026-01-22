@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { QuestionModel } from '../../types';
-import { uploadToStorage, generateUniqueFilename } from '../../services/storageService';
-import { solveQuestionWithDiagram } from '../../services/geminiService';
+import { uploadDiagramFile, generateUniqueFilename } from '../../services/storageService';
+import { analyzeQuestionStructureFromImage, solveQuestionWithDiagram } from '../../services/geminiService';
+import { runStructureClassification } from '../../services/problemPipeline';
 
 interface ManualDiagramReviewProps {
     questions: QuestionModel[];
@@ -77,13 +78,26 @@ const ManualDiagramReview: React.FC<ManualDiagramReviewProps> = ({
         setIsUploading(true);
         try {
             const filename = generateUniqueFilename('jpg');
-            const url = await uploadToStorage(file, `diagrams/${filename}`);
+            const url = await uploadDiagramFile(file, filename);
             onUpdateQuestion(activeItem.originalIndex, {
                 diagramUrl: url,
                 needsManualDiagram: false // Mark as resolved
             });
             try {
                 const dataUrl = await readFileAsDataUrl(file);
+                try {
+                    const structure = await analyzeQuestionStructureFromImage(activeItem.question, dataUrl);
+                    console.log('[structure]', structure);
+                    const { normalizedStructure, problemClass, solveInput } = runStructureClassification(activeItem.question, structure);
+                    onUpdateQuestion(activeItem.originalIndex, {
+                        structureAnalysis: normalizedStructure,
+                        problemClass,
+                        solveInput
+                    });
+                } catch (structureError) {
+                    console.error('Structure analysis failed:', structureError);
+                }
+
                 const { result: solved, warning } = await solveQuestionWithDiagram(activeItem.question, dataUrl);
                 if (warning) {
                     setWarningMessage(warning);

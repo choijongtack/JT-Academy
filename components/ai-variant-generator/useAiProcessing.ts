@@ -29,6 +29,8 @@ import {
     batchClassifyTopics,
     generateQuestionDetails
 } from '../../services/geminiService';
+
+import { buildSubjectIngestionPayload, createIngestionJob } from '../../services/ingestionService';
 import {
     slugifyForStorage,
     buildStandardStoragePath,
@@ -42,9 +44,11 @@ import {
     fetchImageAsBase64,
     validateExamYearValue,
     enforceSubjectQuestionQuota,
+    applyProblemClassification,
     SubjectProcessingPackage,
     PagePreview
 } from './utils';
+import { verifySolveInput } from '../../services/problemPipeline';
 
 // Types and Interfaces
 interface PdfSourceMeta {
@@ -162,6 +166,7 @@ const chunkSegmentsForGemini = (segments: PlainTextQuestionSegment[], maxChars: 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 const DIAGRAM_PATTERN = /\[\s*\uADF8\uB9BC\s*\uC788\uC74C\s*\]/;
+const DEFAULT_DIAGRAM_BOUNDS = { x: 0, y: 0, width: 200, height: 200 };
 
 const BACKGROUND_METADATA_BATCH_SIZE = 5;
 const BACKGROUND_METADATA_DELAY_MS = 400;
@@ -266,6 +271,7 @@ export const useAiProcessing = ({
     const [generatedVariants, setGeneratedVariants] = useState<QuestionModel[]>([]); // Kept for JSON load compatibility
     const [error, setError] = useState<string | null>(null);
     const [previewImages, setPreviewImages] = useState<string[]>([]);
+    const [isDiagramOnlyMode, setIsDiagramOnlyMode] = useState(false);
 
     // Maps & Caches
     const [questionPageMap, setQuestionPageMap] = useState<Map<number, number>>(new Map());
@@ -291,6 +297,24 @@ export const useAiProcessing = ({
     const [isDiagramReviewOpen, setIsDiagramReviewOpen] = useState(false);
     const [isDiagramReviewComplete, setIsDiagramReviewComplete] = useState(false);
     const [isManualReviewOpen, setIsManualReviewOpen] = useState(false);
+    const [diagramUpdateWarning, setDiagramUpdateWarning] = useState<string | null>(null);
+    const [diagramMatchPreview, setDiagramMatchPreview] = useState<Array<{
+        index: number;
+        questionNumber: number | null;
+        subject: string;
+        year: number | null;
+        examSession: number | null;
+        textPreview: string;
+        matchStatus: 'ready' | 'no-subject' | 'no-number' | 'not-found';
+    }>>([]);
+    const [lastVerificationSummary, setLastVerificationSummary] = useState<{
+        subject: string;
+        verifiedCount: number;
+        needsReviewCount: number;
+        reasons: Record<string, number>;
+    } | null>(null);
+    const ingestionJobMapRef = useRef<Map<string, number>>(new Map());
+    const autoSaveAttemptedRef = useRef<Set<string>>(new Set());
 
     // --- Year State ---
     const [yearInput, setYearInput] = useState<number | ''>('');
@@ -379,6 +403,7 @@ export const useAiProcessing = ({
             return;
         }
         setExamSessionInput(numericValue);
+        console.log('[ExamSession] updated:', numericValue);
     };
 
     const isYearValid = typeof yearInput === 'number' && yearError === null;
@@ -452,6 +477,7 @@ export const useAiProcessing = ({
         setSelectedFiles([]);
         setError(null);
         resetYearState();
+        setIsDiagramOnlyMode(false);
     };
 
     // Helper: Range Management
@@ -539,7 +565,7 @@ export const useAiProcessing = ({
 
 
     // --- CORE LOGIC: PROCESS START ---
-    const handleProcessStart = async () => {
+    const handleProcessStart = async (diagramOnlyMode: boolean = isDiagramOnlyMode) => {
         if (selectedFiles.length === 0) return;
 
         const rangeValidationMessage = validateSubjectRanges();
@@ -549,8 +575,14 @@ export const useAiProcessing = ({
         }
 
         resetYearState();
+        setIsDiagramOnlyMode(diagramOnlyMode);
         cancelProcessingRef.current = false;
         setIsProcessing(true);
+        const timingStart = performance.now();
+        const logTiming = (label: string) => {
+            const ms = Math.round(performance.now() - timingStart);
+            console.log(`[Timing] ${label}: ${ms}ms`);
+        };
         setError(null);
         setExtractedQuestions([]);
         setGeneratedVariants([]);
@@ -580,6 +612,56 @@ export const useAiProcessing = ({
             let hasPdfFiles = false;
             let hasTxtFiles = false;
             xObjectUrlCacheRef.current = new Map();
+
+            const summarizeVerification = (questions: QuestionModel[]) => {
+                const summary = {
+                    verifiedCount: 0,
+                    needsReviewCount: 0,
+                    reasons: {} as Record<string, number>
+                };
+                questions.forEach(question => {
+                    const result = verifySolveInput(question);
+                    if (result.status === 'VERIFIED') {
+                        summary.verifiedCount += 1;
+                        return;
+                    }
+                    summary.needsReviewCount += 1;
+                    if (result.reason) {
+                        summary.reasons[result.reason] = (summary.reasons[result.reason] ?? 0) + 1;
+                    }
+                });
+                return summary;
+            };
+
+            const createIngestionJobForSubject = async (
+                subjectName: string,
+                questions: QuestionModel[],
+                mode: 'txt' | 'pdf-text' | 'image'
+            ) => {
+                try {
+                    const verificationSummary = summarizeVerification(questions);
+                    setLastVerificationSummary({
+                        subject: subjectName,
+                        ...verificationSummary
+                    });
+                    const payload = buildSubjectIngestionPayload({
+                        certification,
+                        subject: subjectName,
+                        year: detectedYear ?? (typeof yearInput === 'number' ? yearInput : null),
+                        examSession: typeof examSessionInput === 'number' ? examSessionInput : null,
+                        mode,
+                        questionCount: questions.length,
+                        questions,
+                        verificationSummary
+                    });
+                    const job = await createIngestionJob(payload);
+                    setStatusMessage(`${subjectName} ingestion job ${job.id} (${job.status}) created.`);
+                    console.log(`[${subjectName}] ingestion job created: ${job.id} (${job.status})`);
+                    ingestionJobMapRef.current.set(subjectName, job.id);
+                } catch (jobError) {
+                    console.error(`[${subjectName}] ingestion job failed`, jobError);
+                }
+            };
 
             const renderPdfPageToImage = async (pdfData: Uint8Array, pageNumber: number): Promise<string> => {
                 const loadingTask = pdfjsLib.getDocument({ data: pdfData.slice() });
@@ -668,8 +750,9 @@ export const useAiProcessing = ({
             }
 
             const useTextMode = hasPdfFiles && !hasImageFiles;
-            if (!useTextMode && allImages.length > 0) {
+            if (!useTextMode && allImages.length > 0 && !diagramOnlyMode) {
                 await uploadPreviewImagesToStorage(allImages);
+                logTiming('preview image upload');
             }
 
             const yearInfo = detectedYear ? ` - 연도: ${detectedYear} 년` : '';
@@ -677,7 +760,7 @@ export const useAiProcessing = ({
                 setStatusMessage(`텍스트 기반 PDF ${totalPdfPages}페이지 처리 시작${selectedSubject ? ` - 과목: ${selectedSubject}` : ''}${yearInfo}`);
                 setPreviewImages([]);
             } else {
-                setStatusMessage(`AI가 ${allImages.length}장의 이미지를 분석 중...${selectedSubject ? ` - 과목: ${selectedSubject}` : ''}${yearInfo} `);
+                setStatusMessage(`Caching AI analysis for ${allImages.length} images...`);
                 setPreviewImages(allImages);
             }
 
@@ -691,7 +774,7 @@ export const useAiProcessing = ({
                 ? subjectRanges
                 : [{
                     ...createSubjectRange({
-                        name: normalizedSelectedSubject || selectedSubject || '선택 과목',
+                        name: normalizedSelectedSubject || selectedSubject || subjectRanges[0]?.name || '선택 과목',
                         startPage: 1,
                         endPage: Math.max(1, totalPages),
                         questionStart: 1,
@@ -760,506 +843,639 @@ export const useAiProcessing = ({
                 return segments;
             };
 
-            if (!shouldUseSubjectRanges) {
-                const fallbackRange = processingRanges[0] || createSubjectRange({
-                    name: normalizedSelectedSubject || selectedSubject || '선택 과목',
-                    startPage: 1,
-                    endPage: Math.max(1, totalPages),
-                    questionStart: 1,
-                    questionEnd: QUESTIONS_PER_SUBJECT
+            const cachedImageQuestionsByPage = new Map<number, QuestionModel[]>();
+            const cachedImageRawQuestions: QuestionModel[] = [];
+
+            if (!useTextMode && shouldUseSubjectRanges) {
+                setStatusMessage(`AI가 ${allImages.length}장의 이미지를 분석해 캐시하는 중...`);
+                for (let idx = 0; idx < allImages.length; idx++) {
+                    const pageIndex = idx;
+                    const pageNumber = pageIndex + 1;
+                    let questions: QuestionModel[] = [];
+                    try {
+                        questions = await analyzeQuestionsFromImages(
+                            [allImages[idx]],
+                            selectedSubject || undefined,
+                            CERTIFICATION_SUBJECTS[certification]
+                        );
+                    } catch (err) {
+                        console.error(`[Cache] Page ${pageNumber}: Failed to analyze -`, err);
+                    }
+
+                    questions.forEach((q) => {
+                        cachedImageRawQuestions.push(q);
+                        (q as QuestionModel & { __pageIndex?: number; __diagramBounds?: QuestionModel['diagramBounds'] }).__pageIndex = pageIndex;
+                        (q as QuestionModel & { __pageIndex?: number; __diagramBounds?: QuestionModel['diagramBounds'] }).__diagramBounds =
+                            q.diagramBounds ?? undefined;
+                    });
+                    cachedImageQuestionsByPage.set(pageIndex, questions);
+                }
+                logTiming('image analysis cache complete');
+            }
+            const shouldFastDiagramOnly = diagramOnlyMode && shouldUseSubjectRanges && !useTextMode && !hasTxtFiles;
+            if (shouldFastDiagramOnly) {
+                cachedImageRawQuestions.forEach((question, idx) => {
+                    allQuestions.push(question);
+                    const questionWithMeta = question as QuestionModel & { __pageIndex?: number; __diagramBounds?: QuestionModel['diagramBounds'] };
+                    const pageIndex = questionWithMeta.__pageIndex ?? 0;
+                    pageMap.set(idx, pageIndex);
+                    diagramMap.set(idx, {
+                        pageIndex,
+                        bounds: questionWithMeta.__diagramBounds ?? DEFAULT_DIAGRAM_BOUNDS
+                    });
                 });
-                fallbackRange.startPage = 1;
-                fallbackRange.endPage = totalPages;
-                fallbackRange.questionStart = 1;
-                fallbackRange.questionEnd = QUESTIONS_PER_SUBJECT;
-                processingRanges.splice(0, processingRanges.length, fallbackRange);
+            }
+            if (diagramOnlyMode) {
+                const combinedQuestionPageMap = Array.from(pageMap.entries()).map(([qIdx, pageIdx]) => [qIdx, pageIdx] as [number, number]);
+                const combinedQuestionDiagramMap = Array.from(diagramMap.entries()).map(([qIdx, info]) => [qIdx, info] as [number, typeof info]);
+                const combinedPreviewMeta: PagePreview[] = [];
+                if (!useTextMode) {
+                    allImages.forEach((dataUrl, pageIndex) => {
+                        combinedPreviewMeta.push({ pageIndex, dataUrl, imageUrl: null });
+                    });
+                } else {
+                    combinedPreviewMeta.push(...collectDiagramPreviewMetadata(0, allQuestions.length));
+                }
+                if (allQuestions.length > 0) {
+                    logTiming('diagram review ready');
+                    const subjectLabel = normalizedSelectedSubject || selectedSubject || '전체';
+                    setPendingSubjectPackage({
+                        subjectName: subjectLabel,
+                        questions: allQuestions,
+                        questionPageMap: combinedQuestionPageMap,
+                        questionDiagramMap: combinedQuestionDiagramMap,
+                        previewImages: combinedPreviewMeta
+                    });
+                    setIsBatchConfirmed(false);
+                    const hasDiagrams = combinedQuestionDiagramMap.length > 0;
+                    setIsDiagramReviewOpen(hasDiagrams);
+                    setIsDiagramReviewComplete(!hasDiagrams);
+                    setIsPaused(true);
+                    setPendingSubjects([]);
+                    setExtractedQuestions(allQuestions);
+                } else {
+                    setPendingSubjectPackage(null);
+                    setIsBatchConfirmed(true);
+                    setIsDiagramReviewComplete(true);
+                }
+            } else if (!shouldUseSubjectRanges) {
+                setXObjects([]);
+                setQuestionPageMap(pageMap);
+                setQuestionDiagramMap(diagramMap);
+                setExtractedQuestions(allQuestions);
+
+                if (allQuestions.length == 0) {
+                    setStatusMessage('인식된 문제가 0건입니다. 파일 내용을 확인해주세요.');
+                } else {
+                    setStatusMessage(`문제 인식 완료! ${allQuestions.length}건의 문항을 추출했습니다.`);
+                }
             }
 
-            for (const subjectBatch of processingRanges) {
-                if (cancelProcessingRef.current) {
-                    setStatusMessage('작업이 중단되었습니다.');
-                    setCurrentSubject(null);
-                    break;
-                }
+            if (!shouldFastDiagramOnly) {
+                for (const subjectBatch of processingRanges) {
+                    if (cancelProcessingRef.current) {
+                        setStatusMessage('작업이 중단되었습니다.');
+                        setCurrentSubject(null);
+                        break;
+                    }
 
-                const subjectName = subjectBatch.name.trim();
-                const currentIndex = processingRanges.findIndex(range => range.id === subjectBatch.id);
-                const safeStartPage = Math.max(1, subjectBatch.startPage);
-                const safeEndPage = Math.max(safeStartPage, subjectBatch.endPage);
+                    const subjectName = subjectBatch.name.trim();
+                    const currentIndex = processingRanges.findIndex(range => range.id === subjectBatch.id);
+                    let safeStartPage = Math.max(1, subjectBatch.startPage);
+                    let safeEndPage = Math.max(safeStartPage, subjectBatch.endPage);
+                    if (shouldUseSubjectRanges) {
+                        safeStartPage = 1;
+                        safeEndPage = totalPages;
+                    }
 
-                if (!hasTxtFiles && safeStartPage > totalPages) continue;
+                    if (!hasTxtFiles && safeStartPage > totalPages) continue;
 
-                const startIdx = Math.max(0, safeStartPage - 1);
-                const endIdx = Math.min(safeEndPage - 1, totalPages - 1);
-                const displayStartPage = startIdx + 1;
-                const displayEndPage = endIdx + 1;
-                const minQuestionNumber = Math.max(1, subjectBatch.questionStart);
-                const maxQuestionNumber = Math.max(minQuestionNumber, subjectBatch.questionEnd);
+                    const startIdx = Math.max(0, safeStartPage - 1);
+                    const endIdx = Math.min(safeEndPage - 1, totalPages - 1);
+                    const displayStartPage = startIdx + 1;
+                    const displayEndPage = endIdx + 1;
+                    const minQuestionNumber = Math.max(1, subjectBatch.questionStart);
+                    const maxQuestionNumber = Math.max(minQuestionNumber, subjectBatch.questionEnd);
 
-                setCurrentSubject(subjectName);
+                    setCurrentSubject(subjectName);
 
-                // ---------------- TXT MODE ---------------
-                if (hasTxtFiles) {
-                    const relevantSegments = filterSegmentsForRange(
-                        txtSegments,
-                        minQuestionNumber,
-                        maxQuestionNumber,
-                        Boolean(selectedSubject)
-                    );
-                    const diagramNumberSet = new Set<number>();
-                    const diagramIndexSet = new Set<number>();
-                    relevantSegments.forEach(segment => {
-                        if (DIAGRAM_PATTERN.test(segment.text)) {
-                            diagramIndexSet.add(relevantSegments.indexOf(segment));
-                            if (segment.questionNumber !== null) {
-                                diagramNumberSet.add(segment.questionNumber);
+                    // ---------------- TXT MODE ---------------
+                    if (hasTxtFiles) {
+                        const relevantSegments = filterSegmentsForRange(
+                            txtSegments,
+                            minQuestionNumber,
+                            maxQuestionNumber,
+                            Boolean(selectedSubject)
+                        );
+                        const diagramNumberSet = new Set<number>();
+                        const diagramIndexSet = new Set<number>();
+                        relevantSegments.forEach(segment => {
+                            if (DIAGRAM_PATTERN.test(segment.text)) {
+                                diagramIndexSet.add(relevantSegments.indexOf(segment));
+                                if (segment.questionNumber !== null) {
+                                    diagramNumberSet.add(segment.questionNumber);
+                                }
+                            }
+                        });
+
+                        if (relevantSegments.length === 0) {
+                            setStatusMessage(`${subjectName}: TXT 범위에서 문항을 찾지 못했습니다.`);
+                            continue;
+                        }
+
+                        const chunks = chunkSegmentsForGemini(relevantSegments, 3600);
+                        const subjectQuestions: QuestionModel[] = [];
+
+                        for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
+                            if (cancelProcessingRef.current) break;
+                            setStatusMessage(`${subjectName} TXT 분석 중... (${chunkIndex + 1}/${chunks.length})`);
+                            try {
+                                console.log(`[TXT] ${subjectName} chunk ${chunkIndex + 1}/${chunks.length} length=${chunks[chunkIndex].length}`);
+                                const parsed = await analyzeQuestionsFromText(chunks[chunkIndex]);
+                                subjectQuestions.push(...parsed);
+                            } catch (chunkError) {
+                                console.error('TXT chunk analyze failed', chunkError);
                             }
                         }
-                    });
 
-                    if (relevantSegments.length === 0) {
-                        setStatusMessage(`${subjectName}: TXT 범위에서 문항을 찾지 못했습니다.`);
+                        if (cancelProcessingRef.current) {
+                            setStatusMessage('작업이 중단되었습니다.');
+                            setCurrentSubject(null);
+                            break;
+                        }
+
+                        const isQuestionInRange = (question: QuestionModel) => {
+                            if (selectedSubject) return true;
+                            const detectedNumber = extractLeadingQuestionNumber(question.questionText);
+                            if (detectedNumber !== null) {
+                                return detectedNumber >= minQuestionNumber && detectedNumber <= maxQuestionNumber;
+                            }
+                            return true;
+                        };
+
+                        const filteredQuestions = subjectQuestions.filter(isQuestionInRange);
+                        const rangeBasedLimit = selectedSubject
+                            ? QUESTIONS_PER_SUBJECT
+                            : (maxQuestionNumber - minQuestionNumber + 1);
+
+                        let enforcedSubjectQuestions = enforceSubjectQuestionQuota(
+                            filteredQuestions,
+                            subjectQuestions,
+                            rangeBasedLimit,
+                            isQuestionInRange
+                        );
+                        enforcedSubjectQuestions = applyDiagramIndicators(enforcedSubjectQuestions);
+                        enforcedSubjectQuestions = enforcedSubjectQuestions.map((question, idx) => {
+                            const detectedNumber = extractLeadingQuestionNumber(question.questionText || '');
+                            const needsDiagramByNumber = detectedNumber !== null && diagramNumberSet.has(detectedNumber);
+                            const needsDiagramByIndex = detectedNumber === null && diagramIndexSet.has(idx);
+                            if (needsDiagramByNumber || needsDiagramByIndex) {
+                                return {
+                                    ...question,
+                                    needsManualDiagram: true
+                                };
+                            }
+                            return question;
+                        });
+                        enforcedSubjectQuestions = enforcedSubjectQuestions.map((question, idx) => {
+                            const detectedNumber = extractLeadingQuestionNumber(question.questionText || '');
+                            return {
+                                ...question,
+                                subject: subjectName,
+                                questionNumber: detectedNumber ?? question.questionNumber ?? null
+                            };
+                        });
+                        enforcedSubjectQuestions = applyProblemClassification(enforcedSubjectQuestions);
+                        await createIngestionJobForSubject(subjectName, enforcedSubjectQuestions, 'txt');
+
+                        const startIndex = allQuestions.length;
+                        allQuestions.push(...enforcedSubjectQuestions);
+                        setExtractedQuestions(enforcedSubjectQuestions);
+
+                        const requiresManualDiagram = enforcedSubjectQuestions.some(q => q.needsManualDiagram);
+                        setIsManualReviewOpen(requiresManualDiagram);
+
+                        const subjectData: any = {
+                            subject: subjectName,
+                            extractedQuestions: enforcedSubjectQuestions,
+                            questionRange: { start: minQuestionNumber, end: maxQuestionNumber },
+                            savedAt: new Date().toISOString()
+                        };
+                        blobDownload(subjectData, subjectName);
+
+                        setCompletedSubjects(prev => [...prev, subjectName]);
+                        setStatusMessage(`${subjectName} 완료!`);
+
+                        setPendingSubjectPackage(buildSubjectPackage(subjectName, startIndex, enforcedSubjectQuestions, []));
+                        setIsBatchConfirmed(false);
+                        setIsDiagramReviewOpen(false);
+                        setIsDiagramReviewComplete(true);
+
+                        setIsPaused(true);
+                        const nextSubjects = processingRanges.slice(Math.max(0, currentIndex + 1)).map(s => s.name);
+                        setPendingSubjects(nextSubjects);
+
+                        await waitForResume();
                         continue;
                     }
 
-                    const chunks = chunkSegmentsForGemini(relevantSegments, 3600);
-                    const subjectQuestions: QuestionModel[] = [];
+                    // ---------------- TEXT MODE ---------------
+                    if (useTextMode) {
+                        const subjectSegments = resolveSubjectSegments(displayStartPage, displayEndPage);
+                        if (subjectSegments.length === 0) continue;
 
-                    for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
-                        if (cancelProcessingRef.current) break;
-                        setStatusMessage(`${subjectName} TXT 분석 중... (${chunkIndex + 1}/${chunks.length})`);
-                        try {
-                            console.log(`[TXT] ${subjectName} chunk ${chunkIndex + 1}/${chunks.length} length=${chunks[chunkIndex].length}`);
-                            const parsed = await analyzeQuestionsFromText(chunks[chunkIndex]);
-                            subjectQuestions.push(...parsed);
-                        } catch (chunkError) {
-                            console.error('TXT chunk analyze failed', chunkError);
-                        }
-                    }
+                        const subjectTextPages: PdfPageText[] = [];
+                        const subjectAnchorsByPage = new Map<number, PdfQuestionAnchor[]>();
+                        const pageDimensions = new Map<number, { width: number; height: number }>();
+                        const pageSourceMap = new Map<number, PdfSourceMeta>();
+                        let subjectHasText = false;
+                        const totalSegmentPages = subjectSegments.reduce((sum, seg) => sum + (seg.end - seg.start + 1), 0);
+                        let processedTextPages = 0;
 
-                    if (cancelProcessingRef.current) {
-                        setStatusMessage('작업이 중단되었습니다.');
-                        setCurrentSubject(null);
-                        break;
-                    }
-
-                    const isQuestionInRange = (question: QuestionModel) => {
-                        if (selectedSubject) return true;
-                        const detectedNumber = extractLeadingQuestionNumber(question.questionText);
-                        if (detectedNumber !== null) {
-                            return detectedNumber >= minQuestionNumber && detectedNumber <= maxQuestionNumber;
-                        }
-                        return true;
-                    };
-
-                    const filteredQuestions = subjectQuestions.filter(isQuestionInRange);
-                    const rangeBasedLimit = selectedSubject
-                        ? QUESTIONS_PER_SUBJECT
-                        : (maxQuestionNumber - minQuestionNumber + 1);
-
-                    let enforcedSubjectQuestions = enforceSubjectQuestionQuota(
-                        filteredQuestions,
-                        subjectQuestions,
-                        rangeBasedLimit,
-                        isQuestionInRange
-                    );
-                    enforcedSubjectQuestions = applyDiagramIndicators(enforcedSubjectQuestions);
-                    enforcedSubjectQuestions = enforcedSubjectQuestions.map((question, idx) => {
-                        const detectedNumber = extractLeadingQuestionNumber(question.questionText || '');
-                        const needsDiagramByNumber = detectedNumber !== null && diagramNumberSet.has(detectedNumber);
-                        const needsDiagramByIndex = detectedNumber === null && diagramIndexSet.has(idx);
-                        if (needsDiagramByNumber || needsDiagramByIndex) {
-                            return {
-                                ...question,
-                                needsManualDiagram: true
-                            };
-                        }
-                        return question;
-                    });
-                    enforcedSubjectQuestions = enforcedSubjectQuestions.map((question, idx) => {
-                        const detectedNumber = extractLeadingQuestionNumber(question.questionText || '');
-                        return {
-                            ...question,
-                            subject: subjectName,
-                            questionNumber: detectedNumber ?? question.questionNumber ?? null
-                        };
-                    });
-
-                    const startIndex = allQuestions.length;
-                    allQuestions.push(...enforcedSubjectQuestions);
-                    setExtractedQuestions(enforcedSubjectQuestions);
-
-                    const requiresManualDiagram = enforcedSubjectQuestions.some(q => q.needsManualDiagram);
-                    setIsManualReviewOpen(requiresManualDiagram);
-
-                    const subjectData: any = {
-                        subject: subjectName,
-                        extractedQuestions: enforcedSubjectQuestions,
-                        questionRange: { start: minQuestionNumber, end: maxQuestionNumber },
-                        savedAt: new Date().toISOString()
-                    };
-                    blobDownload(subjectData, subjectName);
-
-                    setCompletedSubjects(prev => [...prev, subjectName]);
-                    setStatusMessage(`${subjectName} 완료!`);
-
-                    setPendingSubjectPackage(buildSubjectPackage(subjectName, startIndex, enforcedSubjectQuestions, []));
-                    setIsBatchConfirmed(false);
-                    setIsDiagramReviewOpen(false);
-                    setIsDiagramReviewComplete(true);
-
-                    setIsPaused(true);
-                    const nextSubjects = processingRanges.slice(Math.max(0, currentIndex + 1)).map(s => s.name);
-                    setPendingSubjects(nextSubjects);
-
-                    await waitForResume();
-                    continue;
-                }
-
-                // ---------------- TEXT MODE ---------------
-                if (useTextMode) {
-                    const subjectSegments = resolveSubjectSegments(displayStartPage, displayEndPage);
-                    if (subjectSegments.length === 0) continue;
-
-                    const subjectTextPages: PdfPageText[] = [];
-                    const subjectAnchorsByPage = new Map<number, PdfQuestionAnchor[]>();
-                    const pageDimensions = new Map<number, { width: number; height: number }>();
-                    const pageSourceMap = new Map<number, PdfSourceMeta>();
-                    let subjectHasText = false;
-                    const totalSegmentPages = subjectSegments.reduce((sum, seg) => sum + (seg.end - seg.start + 1), 0);
-                    let processedTextPages = 0;
-
-                    for (const segment of subjectSegments) {
-                        const segmentPageCount = segment.end - segment.start + 1;
-                        setStatusMessage(`${subjectName} 텍스트 추출 중... (${processedTextPages}/${totalSegmentPages}페이지)`);
-                        const pages = await extractStructuredTextFromPdf(segment.source.data, { start: segment.start, end: segment.end });
-                        const adjustedPages = pages.map(page => ({ ...page, pageIndex: page.pageIndex + segment.source.baseIndex }));
-                        adjustedPages.forEach(page => {
-                            subjectTextPages.push(page);
-                            subjectAnchorsByPage.set(page.pageIndex, page.questionAnchors);
-                            pageDimensions.set(page.pageIndex, { width: page.width, height: page.height });
-                            pageSourceMap.set(page.pageIndex, segment.source);
-                            if (page.text && page.text.trim().length > 0) subjectHasText = true;
-                            page.questionAnchors.forEach(anchor => {
-                                if (!questionPageLookup.has(anchor.questionNumber)) {
-                                    questionPageLookup.set(anchor.questionNumber, page.pageIndex);
-                                }
-                            });
-                        });
-                        processedTextPages += segmentPageCount;
-                    }
-
-                    if (!subjectHasText) {
-                        setStatusMessage('텍스트 기반이 아닌 PDF는 현재 처리할 수 없습니다.');
-                        setError('PDF 내부에서 텍스트를 추출하지 못했습니다.');
-                        setIsProcessing(false);
-                        return;
-                    }
-
-                    const orderedPages = [...subjectTextPages].sort((a, b) => a.pageIndex - b.pageIndex);
-                    const subjectText = orderedPages.map(page => `# Page ${page.pageIndex + 1}\n${page.text}`).join('\n\n');
-
-                    if (!subjectText.trim()) continue;
-
-                    setStatusMessage(`${subjectName} 분석 중 (Gemini ${currentIndex + 1}/${processingRanges.length})`);
-                    const textQuestions = await analyzeQuestionsFromText(subjectText);
-
-                    // Conditional filtering based on mode:
-                    // - Single subject mode: Accept all questions (count limit only)
-                    // - Multi subject mode: Filter by question number to separate subjects
-                    const isQuestionInRange = (question: QuestionModel) => {
-                        // Single subject mode: accept all questions regardless of number
-                        if (selectedSubject) {
-                            return true;
-                        }
-
-                        // Multi subject mode: filter by question number range
-                        const detectedNumber = extractLeadingQuestionNumber(question.questionText);
-                        if (detectedNumber !== null) {
-                            return detectedNumber >= minQuestionNumber && detectedNumber <= maxQuestionNumber;
-                        }
-
-                        // If we can't detect the number, accept it (fallback)
-                        return true;
-                    };
-
-                    const filteredQuestions = textQuestions.filter(q => isQuestionInRange(q));
-
-                    // Calculate limit based on question number range
-                    // e.g., 1-20 = 20 questions, 21-40 = 20 questions, 41-80 = 40 questions
-                    const rangeBasedLimit = selectedSubject
-                        ? QUESTIONS_PER_SUBJECT  // Single subject mode: use default limit
-                        : (maxQuestionNumber - minQuestionNumber + 1);  // Multi subject mode: use range size
-
-                    const enforcedSubjectQuestions = enforceSubjectQuestionQuota(filteredQuestions, textQuestions, rangeBasedLimit, isQuestionInRange);
-
-                    const startIndex = allQuestions.length;
-                    allQuestions.push(...enforcedSubjectQuestions);
-
-                    for (let idx = 0; idx < enforcedSubjectQuestions.length; idx++) {
-                        const q = enforcedSubjectQuestions[idx];
-                        const questionIdx = startIndex + idx;
-                        const detectedNumber = extractLeadingQuestionNumber(q.questionText);
-                        let pageIndexForQuestion = startIdx;
-                        if (detectedNumber !== null && questionPageLookup.has(detectedNumber)) {
-                            pageIndexForQuestion = questionPageLookup.get(detectedNumber)!;
-                        }
-                        pageMap.set(questionIdx, pageIndexForQuestion);
-                        const DIAGRAM_KEYWORDS = ["그림", "도면", "회로", "형상", "도식", "도표"];
-                        const needsDiagram = DIAGRAM_KEYWORDS.some(keyword => q.questionText.includes(keyword));
-                        if (needsDiagram && detectedNumber !== null) {
-                            const pageMeta = pageDimensions.get(pageIndexForQuestion);
-                            const sourceMeta = pageSourceMap.get(pageIndexForQuestion);
-                            if (pageMeta && sourceMeta) {
-                                const pdfData = sourceMeta.data;
-                                const pageIndexInPdf = pageIndexForQuestion - sourceMeta.baseIndex + 1;
-                                try {
-                                    const processedImage = await renderPdfPageToImage(pdfData, pageIndexInPdf);
-                                    if (processedImage) {
-                                        const globalPageIndex = pageIndexForQuestion;
-                                        pageImageDataRef.current.set(globalPageIndex, processedImage);
+                        for (const segment of subjectSegments) {
+                            const segmentPageCount = segment.end - segment.start + 1;
+                            setStatusMessage(`${subjectName} 텍스트 추출 중... (${processedTextPages}/${totalSegmentPages}페이지)`);
+                            const pages = await extractStructuredTextFromPdf(segment.source.data, { start: segment.start, end: segment.end });
+                            const adjustedPages = pages.map(page => ({ ...page, pageIndex: page.pageIndex + segment.source.baseIndex }));
+                            adjustedPages.forEach(page => {
+                                subjectTextPages.push(page);
+                                subjectAnchorsByPage.set(page.pageIndex, page.questionAnchors);
+                                pageDimensions.set(page.pageIndex, { width: page.width, height: page.height });
+                                pageSourceMap.set(page.pageIndex, segment.source);
+                                if (page.text && page.text.trim().length > 0) subjectHasText = true;
+                                page.questionAnchors.forEach(anchor => {
+                                    if (!questionPageLookup.has(anchor.questionNumber)) {
+                                        questionPageLookup.set(anchor.questionNumber, page.pageIndex);
                                     }
-                                } catch (e) {
-                                    console.error('Failed to render PDF page for diagram', e);
-                                }
-                            }
-                            // To fix this correctly, I'll add the render helper inside this hook or file.
+                                });
+                            });
+                            processedTextPages += segmentPageCount;
                         }
-                    }
 
+                        if (!subjectHasText) {
+                            setStatusMessage('텍스트 기반이 아닌 PDF는 현재 처리할 수 없습니다.');
+                            setError('PDF 내부에서 텍스트를 추출하지 못했습니다.');
+                            setIsProcessing(false);
+                            return;
+                        }
 
-                    const subjectData: any = {
-                        subject: subjectName,
-                        extractedQuestions: enforcedSubjectQuestions,
-                        pageRange: { start: displayStartPage, end: displayEndPage },
-                        questionRange: { start: minQuestionNumber, end: maxQuestionNumber },
-                        savedAt: new Date().toISOString()
-                    };
+                        const orderedPages = [...subjectTextPages].sort((a, b) => a.pageIndex - b.pageIndex);
+                        const subjectText = orderedPages.map(page => `# Page ${page.pageIndex + 1}\n${page.text}`).join('\n\n');
 
-                    const subjectPreviewMetadata = collectDiagramPreviewMetadata(startIndex, enforcedSubjectQuestions.length);
+                        if (!subjectText.trim()) continue;
 
-                    if (enforcedSubjectQuestions.length > 0) {
-                        const subjectPackage = buildSubjectPackage(subjectName, startIndex, enforcedSubjectQuestions, subjectPreviewMetadata);
-                        setPendingSubjectPackage(subjectPackage);
-                        setIsBatchConfirmed(false);
-                        const hasDiagrams = subjectPackage.questionDiagramMap.length > 0;
-                        setIsDiagramReviewOpen(hasDiagrams);
-                        setIsDiagramReviewComplete(!hasDiagrams);
-                    } else {
-                        setPendingSubjectPackage(null);
-                        setIsBatchConfirmed(true);
-                        setIsDiagramReviewComplete(true);
-                    }
+                        setStatusMessage(`${subjectName} 분석 중 (Gemini ${currentIndex + 1}/${processingRanges.length})`);
+                        const textQuestions = await analyzeQuestionsFromText(subjectText);
 
-                    setExtractedQuestions(enforcedSubjectQuestions);
-                    // Auto download JSON
-                    blobDownload(subjectData, subjectName);
+                        // Conditional filtering based on mode:
+                        // - Single subject mode: Accept all questions (count limit only)
+                        // - Multi subject mode: Filter by question number to separate subjects
+                        const isQuestionInRange = (question: QuestionModel) => {
+                            // Single subject mode: accept all questions regardless of number
+                            if (selectedSubject) {
+                                return true;
+                            }
 
-                    setCompletedSubjects(prev => [...prev, subjectName]);
-                    setStatusMessage(`${subjectName} 완료!`);
+                            // Multi subject mode: filter by question number range
+                            const detectedNumber = extractLeadingQuestionNumber(question.questionText);
+                            if (detectedNumber !== null) {
+                                return detectedNumber >= minQuestionNumber && detectedNumber <= maxQuestionNumber;
+                            }
 
-                    // IMPORTANT FIX: Removed !isLastSubject check.
-                    // Pausing for every subject to allow saving.
-                    setIsPaused(true);
-                    const nextSubjects = processingRanges.slice(Math.max(0, currentIndex + 1)).map(s => s.name);
-                    setPendingSubjects(nextSubjects);
-
-                    await waitForResume();
-
-                    if (cancelProcessingRef.current) {
-                        setStatusMessage('작업이 중단되었습니다.');
-                        setCurrentSubject(null);
-                        break;
-                    }
-
-                } else {
-                    // ---------------- IMAGE MODE ---------------
-                    const subjectPages = allImages.slice(startIdx, endIdx + 1);
-                    setStatusMessage(`${subjectName} 이미지 분석 중...`);
-
-                    const subjectCandidates: QuestionModel[] = [];
-                    const subjectRawQuestions: QuestionModel[] = [];
-                    const questionMetadata = new Map<QuestionModel, { pageIndex: number; bounds?: { x: number; y: number; width: number; height: number } }>();
-
-                    // Conditional filtering based on mode:
-                    // - Single subject mode: Accept all questions (count limit only)
-                    // - Multi subject mode: Filter by question number to separate subjects
-                    const isQuestionInRange = (question: QuestionModel) => {
-                        // Single subject mode: accept all questions regardless of number
-                        if (selectedSubject) {
+                            // If we can't detect the number, accept it (fallback)
                             return true;
-                        }
+                        };
 
-                        // Multi subject mode: filter by question number range
-                        const detectedNumber = extractLeadingQuestionNumber(question.questionText);
-                        if (detectedNumber !== null) {
-                            return detectedNumber >= minQuestionNumber && detectedNumber <= maxQuestionNumber;
-                        }
+                        const filteredQuestions = textQuestions.filter(q => isQuestionInRange(q));
 
-                        // If we can't detect the number, accept it (fallback)
-                        return true;
-                    };
+                        // Calculate limit based on question number range
+                        // e.g., 1-20 = 20 questions, 21-40 = 20 questions, 41-80 = 40 questions
+                        const rangeBasedLimit = selectedSubject
+                            ? QUESTIONS_PER_SUBJECT  // Single subject mode: use default limit
+                            : (maxQuestionNumber - minQuestionNumber + 1);  // Multi subject mode: use range size
 
-                    // Process images page-by-page for stability and debugging
-                    console.log(`[${subjectName}] Starting page-by-page processing for ${subjectPages.length} pages`);
-                    console.log(`[${subjectName}] Question range filter: ${minQuestionNumber} - ${maxQuestionNumber}`);
+                        const diagramKeywords = ["그림", "도면", "회로", "형상", "도식", "도표"];
+                        const enforcedSubjectQuestions = applyProblemClassification(
+                            enforceSubjectQuestionQuota(filteredQuestions, textQuestions, rangeBasedLimit, isQuestionInRange)
+                                .map(question => {
+                                    const hasKeyword = diagramKeywords.some(keyword => question.questionText.includes(keyword));
+                                    if (!hasKeyword) return question;
+                                    return {
+                                        ...question,
+                                        needsManualDiagram: true
+                                    };
+                                })
+                        );
+                        await createIngestionJobForSubject(subjectName, enforcedSubjectQuestions, 'pdf-text');
 
-                    for (let idx = 0; idx < subjectPages.length; idx++) {
-                        const pageIndex = startIdx + idx;
-                        const pageNumber = pageIndex + 1;
-                        setStatusMessage(`${subjectName} 이미지 분석 중... (${idx + 1}/${subjectPages.length}페이지)`);
+                        const startIndex = allQuestions.length;
+                        allQuestions.push(...enforcedSubjectQuestions);
 
-                        console.log(`\n[${subjectName}] Processing page ${pageNumber} (${idx + 1}/${subjectPages.length})`);
-
-                        let questions: QuestionModel[] = [];
-                        try {
-                            questions = await analyzeQuestionsFromImages(
-                                [subjectPages[idx]],
-                                selectedSubject || undefined,
-                                CERTIFICATION_SUBJECTS[certification]
-                            );
-                            console.log(`[${subjectName}] Page ${pageNumber}: AI extracted ${questions.length} questions`);
-                        } catch (err) {
-                            const errorMsg = err instanceof Error ? err.message : String(err);
-                            console.error(`[${subjectName}] Page ${pageNumber}: Failed to analyze -`, err);
-
-                            // Edge Function 500 에러 감지
-                            if (errorMsg.includes('500') || errorMsg.includes('non-2xx status code')) {
-                                const edgeFunctionError = `🔴 Supabase Edge Function 오류 발생\n\n` +
-                                    `원인:\n` +
-                                    `1. Gemini API 키가 설정되지 않았거나 만료됨\n` +
-                                    `2. Edge Function 내부 오류\n` +
-                                    `3. Gemini API 서버 문제\n\n` +
-                                    `해결 방법:\n` +
-                                    `1. Supabase Dashboard → Edge Functions → gemini-proxy → Logs 확인\n` +
-                                    `2. GEMINI_API_KEY 시크릿이 올바르게 설정되었는지 확인\n` +
-                                    `3. Edge Function을 다시 배포해보세요`;
-                                setError(edgeFunctionError);
-                                setStatusMessage('❌ Edge Function 오류 - Supabase 설정을 확인해주세요');
+                        for (let idx = 0; idx < enforcedSubjectQuestions.length; idx++) {
+                            const q = enforcedSubjectQuestions[idx];
+                            const questionIdx = startIndex + idx;
+                            const detectedNumber = extractLeadingQuestionNumber(q.questionText);
+                            let pageIndexForQuestion = startIdx;
+                            if (detectedNumber !== null && questionPageLookup.has(detectedNumber)) {
+                                pageIndexForQuestion = questionPageLookup.get(detectedNumber)!;
+                            }
+                            pageMap.set(questionIdx, pageIndexForQuestion);
+                            const DIAGRAM_KEYWORDS = ["그림", "도면", "회로", "형상", "도식", "도표"];
+                            const needsDiagram = DIAGRAM_KEYWORDS.some(keyword => q.questionText.includes(keyword));
+                            if (needsDiagram && detectedNumber !== null) {
+                                const pageMeta = pageDimensions.get(pageIndexForQuestion);
+                                const sourceMeta = pageSourceMap.get(pageIndexForQuestion);
+                                if (pageMeta && sourceMeta) {
+                                    const pdfData = sourceMeta.data;
+                                    const pageIndexInPdf = pageIndexForQuestion - sourceMeta.baseIndex + 1;
+                                    try {
+                                        const processedImage = await renderPdfPageToImage(pdfData, pageIndexInPdf);
+                                        if (processedImage) {
+                                            const globalPageIndex = pageIndexForQuestion;
+                                            pageImageDataRef.current.set(globalPageIndex, processedImage);
+                                        }
+                                    } catch (e) {
+                                        console.error('Failed to render PDF page for diagram', e);
+                                    }
+                                }
+                                // To fix this correctly, I'll add the render helper inside this hook or file.
                             }
                         }
-
-                        // Log extracted question numbers
-                        const extractedNumbers = questions.map(q => {
-                            const num = extractLeadingQuestionNumber(q.questionText);
-                            return num !== null ? num : 'N/A';
-                        });
-                        console.log(`[${subjectName}] Page ${pageNumber}: Question numbers detected:`, extractedNumbers);
-
-                        // Log first 100 chars of each question text for debugging
-                        questions.forEach((q, i) => {
-                            const preview = q.questionText.substring(0, 100);
-                            console.log(`[${subjectName}] Page ${pageNumber} Q${i + 1}: "${preview}..."`);
-                        });
-
-                        // Add to raw questions pool
-                        questions.forEach(q => {
-                            subjectRawQuestions.push(q);
-                            if (!questionMetadata.has(q)) {
-                                questionMetadata.set(q, {
+                        for (let idx = 0; idx < enforcedSubjectQuestions.length; idx++) {
+                            const q = enforcedSubjectQuestions[idx];
+                            const questionIdx = startIndex + idx;
+                            const pageIndex = pageMap.get(questionIdx);
+                            if (pageIndex === undefined) continue;
+                            if (!diagramOnlyMode) {
+                                const needsDiagram = Boolean(q.needsManualDiagram);
+                                if (!needsDiagram && !q.diagramBounds) continue;
+                            }
+                            if (!diagramMap.has(questionIdx)) {
+                                diagramMap.set(questionIdx, {
                                     pageIndex,
-                                    bounds: q.diagramBounds ?? undefined
+                                    bounds: q.diagramBounds ?? DEFAULT_DIAGRAM_BOUNDS
                                 });
                             }
+                        }
+
+
+                        const subjectData: any = {
+                            subject: subjectName,
+                            extractedQuestions: enforcedSubjectQuestions,
+                            pageRange: { start: displayStartPage, end: displayEndPage },
+                            questionRange: { start: minQuestionNumber, end: maxQuestionNumber },
+                            savedAt: new Date().toISOString()
+                        };
+
+                        const subjectPreviewMetadata = collectDiagramPreviewMetadata(startIndex, enforcedSubjectQuestions.length);
+
+                        if (enforcedSubjectQuestions.length > 0) {
+                            const subjectPackage = buildSubjectPackage(subjectName, startIndex, enforcedSubjectQuestions, subjectPreviewMetadata);
+                            setPendingSubjectPackage(subjectPackage);
+                            setIsBatchConfirmed(false);
+                            const hasDiagrams = subjectPackage.questionDiagramMap.length > 0;
+                            setIsDiagramReviewOpen(hasDiagrams);
+                            setIsDiagramReviewComplete(!hasDiagrams);
+                        } else {
+                            setPendingSubjectPackage(null);
+                            setIsBatchConfirmed(true);
+                            setIsDiagramReviewComplete(true);
+                        }
+
+                        setExtractedQuestions(enforcedSubjectQuestions);
+                        // Auto download JSON
+                        blobDownload(subjectData, subjectName);
+
+                        setCompletedSubjects(prev => [...prev, subjectName]);
+                        setStatusMessage(`${subjectName} 완료!`);
+
+                        // IMPORTANT FIX: Removed !isLastSubject check.
+                        // Pausing for every subject to allow saving.
+                        setIsPaused(true);
+                        const nextSubjects = processingRanges.slice(Math.max(0, currentIndex + 1)).map(s => s.name);
+                        setPendingSubjects(nextSubjects);
+
+                        await waitForResume();
+
+                        if (cancelProcessingRef.current) {
+                            setStatusMessage('작업이 중단되었습니다.');
+                            setCurrentSubject(null);
+                            break;
+                        }
+
+                    } else {
+                        // ---------------- IMAGE MODE ---------------
+                        const subjectPages = allImages.slice(startIdx, endIdx + 1);
+                        setStatusMessage(`${subjectName} 이미지 분석 중...`);
+
+                        const subjectCandidates: QuestionModel[] = [];
+                        const subjectRawQuestions: QuestionModel[] = [];
+
+                        // Conditional filtering based on mode:
+                        // - Single subject mode: Accept all questions (count limit only)
+                        // - Multi subject mode: Filter by question number to separate subjects
+                        const isQuestionInRange = (question: QuestionModel) => {
+                            // Single subject mode: accept all questions regardless of number
+                            if (selectedSubject) {
+                                return true;
+                            }
+
+                            // Multi subject mode: filter by question number range
+                            const detectedNumber = extractLeadingQuestionNumber(question.questionText);
+                            if (detectedNumber !== null) {
+                                return detectedNumber >= minQuestionNumber && detectedNumber <= maxQuestionNumber;
+                            }
+
+                            // If we can't detect the number, accept it (fallback)
+                            return true;
+                        };
+
+                        // Process images page-by-page for stability and debugging
+                        console.log(`[${subjectName}] Starting page-by-page processing for ${subjectPages.length} pages`);
+                        console.log(`[${subjectName}] Question range filter: ${minQuestionNumber} - ${maxQuestionNumber}`);
+
+                        if (shouldUseSubjectRanges) {
+                            subjectRawQuestions.push(...cachedImageRawQuestions);
+                            const filteredQuestions = cachedImageRawQuestions.filter(isQuestionInRange);
+                            subjectCandidates.push(...filteredQuestions);
+                        } else {
+                            for (let idx = 0; idx < subjectPages.length; idx++) {
+                                const pageIndex = startIdx + idx;
+                                const pageNumber = pageIndex + 1;
+                                setStatusMessage(`${subjectName} 이미지 분석 중... (${idx + 1}/${subjectPages.length}페이지)`);
+
+                                console.log(`
+[${subjectName}] Processing page ${pageNumber} (${idx + 1}/${subjectPages.length})`);
+
+                                let questions: QuestionModel[] = [];
+                                try {
+                                    questions = await analyzeQuestionsFromImages(
+                                        [subjectPages[idx]],
+                                        selectedSubject || undefined,
+                                        CERTIFICATION_SUBJECTS[certification]
+                                    );
+                                    console.log(`[${subjectName}] Page ${pageNumber}: AI extracted ${questions.length} questions`);
+                                } catch (err) {
+                                    const errorMsg = err instanceof Error ? err.message : String(err);
+                                    console.error(`[${subjectName}] Page ${pageNumber}: Failed to analyze -`, err);
+
+                                    if (errorMsg.includes('500') || errorMsg.includes('non-2xx status code')) {
+                                        const edgeFunctionError = `Supabase Edge Function 오류.
+
+원인 후보:
+1. Gemini API 키 누락/오류
+2. Edge Function 배포/로그 오류
+3. Gemini API 요청 제한
+
+확인 방법:
+1. Supabase Dashboard > Edge Functions > gemini-proxy > Logs 확인
+2. GEMINI_API_KEY 설정 확인
+3. Edge Function 재배포`;
+                                        setError(edgeFunctionError);
+                                        setStatusMessage('Edge Function 오류 - Supabase 로그를 확인해주세요.');
+                                    }
+                                }
+
+                                const extractedNumbers = questions.map(q => {
+                                    const num = extractLeadingQuestionNumber(q.questionText);
+                                    return num !== null ? num : 'N/A';
+                                });
+                                console.log(`[${subjectName}] Page ${pageNumber}: Question numbers detected:`, extractedNumbers);
+
+                                questions.forEach((q, i) => {
+                                    const preview = q.questionText.substring(0, 100);
+                                    console.log(`[${subjectName}] Page ${pageNumber} Q${i + 1}: "${preview}..."`);
+                                });
+
+                                questions.forEach((q) => {
+                                    subjectRawQuestions.push(q);
+                                    (q as QuestionModel & { __pageIndex?: number; __diagramBounds?: QuestionModel['diagramBounds'] }).__pageIndex = pageIndex;
+                                    (q as QuestionModel & { __pageIndex?: number; __diagramBounds?: QuestionModel['diagramBounds'] }).__diagramBounds =
+                                        q.diagramBounds ?? undefined;
+                                });
+
+                                const beforeFilterCount = questions.length;
+                                const filteredQuestions = questions.filter(isQuestionInRange);
+                                const afterFilterCount = filteredQuestions.length;
+
+                                console.log(`[${subjectName}] Page ${pageNumber}: Range filter: ${beforeFilterCount} -> ${afterFilterCount} questions`);
+                                if (beforeFilterCount > afterFilterCount) {
+                                    const rejected = questions.filter(q => !isQuestionInRange(q));
+                                    const rejectedNumbers = rejected.map(q => extractLeadingQuestionNumber(q.questionText));
+                                    console.log(`[${subjectName}] Page ${pageNumber}: Rejected question numbers:`, rejectedNumbers);
+                                    rejected.forEach((q, i) => {
+                                        const num = extractLeadingQuestionNumber(q.questionText);
+                                        const preview = q.questionText.substring(0, 80);
+                                        console.log(`[${subjectName}] Page ${pageNumber}: REJECTED Q${i + 1} (num=${num}): "${preview}..."`);
+                                    });
+                                }
+
+                                subjectCandidates.push(...filteredQuestions);
+                                console.log(`[${subjectName}] Page ${pageNumber}: Total candidates so far: ${subjectCandidates.length}`);
+                            }
+
+                            console.log(`\n[${subjectName}] Page processing complete:`);
+                            console.log(`[${subjectName}] - Total raw questions: ${subjectRawQuestions.length}`);
+                            console.log(`[${subjectName}] - Total candidates (after range filter): ${subjectCandidates.length}`);
+                        }
+
+                        // Calculate limit based on question number range
+                        // e.g., 1-20 = 20 questions, 21-40 = 20 questions, 41-80 = 40 questions
+                        const rangeBasedLimit = selectedSubject
+                            ? QUESTIONS_PER_SUBJECT  // Single subject mode: use default limit
+                            : (maxQuestionNumber - minQuestionNumber + 1);  // Multi subject mode: use range size
+
+                        const diagramKeywords = ["그림", "도면", "회로", "형상", "도식", "도표"];
+                        const enforcedSubjectQuestions = applyProblemClassification(
+                            enforceSubjectQuestionQuota(subjectCandidates, subjectRawQuestions, rangeBasedLimit, isQuestionInRange)
+                                .map(question => {
+                                    const hasKeyword = diagramKeywords.some(keyword => question.questionText.includes(keyword));
+                                    if (!hasKeyword) return question;
+                                    return {
+                                        ...question,
+                                        needsManualDiagram: true
+                                    };
+                                })
+                        );
+                        await createIngestionJobForSubject(subjectName, enforcedSubjectQuestions, 'image');
+                        console.log(`[${subjectName}] After quota enforcement: ${enforcedSubjectQuestions.length} questions (limit: ${rangeBasedLimit})`);
+
+                        const finalizedSubjectQuestions = enforcedSubjectQuestions;
+
+                        const subjectStartIndex = allQuestions.length;
+
+                        finalizedSubjectQuestions.forEach((question, idx) => {
+                            const globalIdx = subjectStartIndex + idx;
+                            allQuestions.push(question);
+                            const questionWithMeta = question as QuestionModel & { __pageIndex?: number; __diagramBounds?: QuestionModel['diagramBounds'] };
+                            const pageIndex = questionWithMeta.__pageIndex ?? startIdx;
+                            pageMap.set(globalIdx, pageIndex);
+                            if (questionWithMeta.__diagramBounds) {
+                                diagramMap.set(globalIdx, { pageIndex, bounds: questionWithMeta.__diagramBounds });
+                                return;
+                            }
+                            if (diagramOnlyMode || question.needsManualDiagram) {
+                                diagramMap.set(globalIdx, { pageIndex, bounds: DEFAULT_DIAGRAM_BOUNDS });
+                            }
                         });
 
-                        // Filter by question number range
-                        const beforeFilterCount = questions.length;
-                        const filteredQuestions = questions.filter(isQuestionInRange);
-                        const afterFilterCount = filteredQuestions.length;
+                        console.log(`\n[${subjectName}] FINAL SUMMARY:`);
+                        console.log(`[${subjectName}] - Questions extracted from pages: ${subjectRawQuestions.length}`);
+                        console.log(`[${subjectName}] - Questions after range filter: ${subjectCandidates.length}`);
+                        console.log(`[${subjectName}] - Questions after quota enforcement: ${enforcedSubjectQuestions.length}`);
+                        console.log(`[${subjectName}] - Final questions to save: ${finalizedSubjectQuestions.length}\n`);
 
-                        console.log(`[${subjectName}] Page ${pageNumber}: Range filter: ${beforeFilterCount} -> ${afterFilterCount} questions`);
-                        if (beforeFilterCount > afterFilterCount) {
-                            const rejected = questions.filter(q => !isQuestionInRange(q));
-                            const rejectedNumbers = rejected.map(q => extractLeadingQuestionNumber(q.questionText));
-                            console.log(`[${subjectName}] Page ${pageNumber}: Rejected question numbers:`, rejectedNumbers);
-                            // Log why each was rejected
-                            rejected.forEach((q, i) => {
-                                const num = extractLeadingQuestionNumber(q.questionText);
-                                const preview = q.questionText.substring(0, 80);
-                                console.log(`[${subjectName}] Page ${pageNumber}: REJECTED Q${i + 1} (num=${num}): "${preview}..."`);
-                            });
+                        const subjectPreviewMetadata = createPreviewImageMetadata(startIdx, subjectPages, pageImageUrlCacheRef.current);
+                        const subjectData = {
+                            subject: subjectName,
+                            extractedQuestions: finalizedSubjectQuestions,
+                            savedAt: new Date().toISOString()
+                        };
+
+                        if (finalizedSubjectQuestions.length > 0 && !diagramOnlyMode) {
+                            const subjectPackage = buildSubjectPackage(subjectName, subjectStartIndex, finalizedSubjectQuestions, subjectPreviewMetadata);
+                            setPendingSubjectPackage(subjectPackage);
+                            setIsBatchConfirmed(false);
+                            const hasDiagrams = subjectPackage.questionDiagramMap.length > 0;
+                            const requiresManualDiagram = finalizedSubjectQuestions.some(q => q.needsManualDiagram);
+                            setIsDiagramReviewOpen(hasDiagrams);
+                            setIsDiagramReviewComplete(!hasDiagrams);
+                            if (!hasDiagrams && requiresManualDiagram) {
+                                setIsManualReviewOpen(true);
+                            }
+                        } else if (!diagramOnlyMode) {
+                            setPendingSubjectPackage(null);
+                            setIsBatchConfirmed(true);
+                            setIsDiagramReviewComplete(true);
                         }
 
-                        subjectCandidates.push(...filteredQuestions);
-                        console.log(`[${subjectName}] Page ${pageNumber}: Total candidates so far: ${subjectCandidates.length}`);
-                    }
-
-                    console.log(`\n[${subjectName}] Page processing complete:`);
-                    console.log(`[${subjectName}] - Total raw questions: ${subjectRawQuestions.length}`);
-                    console.log(`[${subjectName}] - Total candidates (after range filter): ${subjectCandidates.length}`);
-
-                    // Calculate limit based on question number range
-                    // e.g., 1-20 = 20 questions, 21-40 = 20 questions, 41-80 = 40 questions
-                    const rangeBasedLimit = selectedSubject
-                        ? QUESTIONS_PER_SUBJECT  // Single subject mode: use default limit
-                        : (maxQuestionNumber - minQuestionNumber + 1);  // Multi subject mode: use range size
-
-                    const enforcedSubjectQuestions = enforceSubjectQuestionQuota(subjectCandidates, subjectRawQuestions, rangeBasedLimit, isQuestionInRange);
-                    console.log(`[${subjectName}] After quota enforcement: ${enforcedSubjectQuestions.length} questions (limit: ${rangeBasedLimit})`);
-
-                    const finalizedSubjectQuestions = enforcedSubjectQuestions;
-
-                    const subjectStartIndex = allQuestions.length;
-
-                    finalizedSubjectQuestions.forEach((question, idx) => {
-                        const globalIdx = subjectStartIndex + idx;
-                        allQuestions.push(question);
-                        const meta = questionMetadata.get(question);
-                        const pageIndex = meta?.pageIndex ?? startIdx;
-                        pageMap.set(globalIdx, pageIndex);
-                        if (meta?.bounds) diagramMap.set(globalIdx, { pageIndex, bounds: meta.bounds });
-                    });
-
-                    console.log(`\n[${subjectName}] FINAL SUMMARY:`);
-                    console.log(`[${subjectName}] - Questions extracted from pages: ${subjectRawQuestions.length}`);
-                    console.log(`[${subjectName}] - Questions after range filter: ${subjectCandidates.length}`);
-                    console.log(`[${subjectName}] - Questions after quota enforcement: ${enforcedSubjectQuestions.length}`);
-                    console.log(`[${subjectName}] - Final questions to save: ${finalizedSubjectQuestions.length}\n`);
-
-                    const subjectPreviewMetadata = createPreviewImageMetadata(startIdx, subjectPages, pageImageUrlCacheRef.current);
-                    const subjectData = {
-                        subject: subjectName,
-                        extractedQuestions: finalizedSubjectQuestions,
-                        savedAt: new Date().toISOString()
-                    };
-
-                    if (finalizedSubjectQuestions.length > 0) {
-                        const subjectPackage = buildSubjectPackage(subjectName, subjectStartIndex, finalizedSubjectQuestions, subjectPreviewMetadata);
-                        setPendingSubjectPackage(subjectPackage);
-                        setIsBatchConfirmed(false);
-                        const hasDiagrams = subjectPackage.questionDiagramMap.length > 0;
-                        const requiresManualDiagram = finalizedSubjectQuestions.some(q => q.needsManualDiagram);
-                        setIsDiagramReviewOpen(hasDiagrams);
-                        setIsDiagramReviewComplete(!hasDiagrams);
-                        if (!hasDiagrams && requiresManualDiagram) {
-                            setIsManualReviewOpen(true);
+                        if (!diagramOnlyMode) {
+                            setExtractedQuestions(finalizedSubjectQuestions);
+                            blobDownload(subjectData, subjectName);
                         }
-                    } else {
-                        setPendingSubjectPackage(null);
-                        setIsBatchConfirmed(true);
-                        setIsDiagramReviewComplete(true);
+                        setCompletedSubjects(prev => [...prev, subjectName]);
+                        setStatusMessage(`${subjectName} 완료!`);
+
+                        // IMPORTANT FIX: Removed !isLastSubject check.
+                        if (!diagramOnlyMode) {
+                            setIsPaused(true);
+                            const nextSubjects = subjectRanges.slice(Math.max(0, currentIndex + 1)).map(s => s.name);
+                            setPendingSubjects(nextSubjects);
+
+                            await waitForResume();
+                        }
+
+                        if (cancelProcessingRef.current) {
+                            setStatusMessage('작업이 중단되었습니다.');
+                            setCurrentSubject(null);
+                            break;
+                        }
                     }
-
-                    setExtractedQuestions(finalizedSubjectQuestions);
-                    blobDownload(subjectData, subjectName);
-                    setCompletedSubjects(prev => [...prev, subjectName]);
-                    setStatusMessage(`${subjectName} 완료!`);
-
-                    // IMPORTANT FIX: Removed !isLastSubject check.
-                    setIsPaused(true);
-                    const nextSubjects = subjectRanges.slice(Math.max(0, currentIndex + 1)).map(s => s.name);
-                    setPendingSubjects(nextSubjects);
-
-                    await waitForResume();
-
-                    if (cancelProcessingRef.current) {
-                        setStatusMessage('작업이 중단되었습니다.');
-                        setCurrentSubject(null);
-                        break;
-                    }
-                }
-            } // End Loop
+                } // End Loop
+            }
+            if (!shouldFastDiagramOnly) {
+                logTiming('subject processing complete');
+            }
 
             if (cancelProcessingRef.current) return;
 
@@ -1267,18 +1483,52 @@ export const useAiProcessing = ({
                 allQuestions.forEach(q => { q.year = detectedYear; });
             }
 
-            if (!shouldUseSubjectRanges) {
+            if (diagramOnlyMode) {
+                const combinedQuestionPageMap = Array.from(pageMap.entries()).map(([qIdx, pageIdx]) => [qIdx, pageIdx] as [number, number]);
+                const combinedQuestionDiagramMap = Array.from(diagramMap.entries()).map(([qIdx, info]) => [qIdx, info] as [number, typeof info]);
+                const combinedPreviewMeta: PagePreview[] = [];
+                if (!useTextMode) {
+                    allImages.forEach((dataUrl, pageIndex) => {
+                        combinedPreviewMeta.push({ pageIndex, dataUrl, imageUrl: null });
+                    });
+                } else {
+                    combinedPreviewMeta.push(...collectDiagramPreviewMetadata(0, allQuestions.length));
+                }
+                if (allQuestions.length > 0) {
+                    const subjectLabel = normalizedSelectedSubject || selectedSubject || '전체';
+                    setPendingSubjectPackage({
+                        subjectName: subjectLabel,
+                        questions: allQuestions,
+                        questionPageMap: combinedQuestionPageMap,
+                        questionDiagramMap: combinedQuestionDiagramMap,
+                        previewImages: combinedPreviewMeta
+                    });
+                    setIsBatchConfirmed(false);
+                    const hasDiagrams = combinedQuestionDiagramMap.length > 0;
+                    setIsDiagramReviewOpen(hasDiagrams);
+                    setIsDiagramReviewComplete(!hasDiagrams);
+                    setIsPaused(true);
+                    setPendingSubjects([]);
+                    setExtractedQuestions(allQuestions);
+                } else {
+                    setPendingSubjectPackage(null);
+                    setIsBatchConfirmed(true);
+                    setIsDiagramReviewComplete(true);
+                    setStatusMessage('인식된 문제가 0건입니다. 파일 내용을 확인해주세요.');
+                }
+            } else if (!shouldUseSubjectRanges) {
                 setXObjects([]);
                 setQuestionPageMap(pageMap);
                 setQuestionDiagramMap(diagramMap);
                 setExtractedQuestions(allQuestions);
 
                 if (allQuestions.length === 0) {
-                    setStatusMessage('⚠️ 처리 완료했지만 0개 문제를 추출했습니다. 위 에러 메시지를 확인하세요.');
+                    setStatusMessage('인식된 문제가 0건입니다. 파일 내용을 확인해주세요.');
                 } else {
-                    setStatusMessage(`전체 처리 완료! ${allQuestions.length}문제를 추출했습니다`);
+                    setStatusMessage(`문제 인식 완료! ${allQuestions.length}건의 문항을 추출했습니다.`);
                 }
             }
+
 
         } catch (err: any) {
             console.error(err);
@@ -1286,6 +1536,9 @@ export const useAiProcessing = ({
         } finally {
             setIsProcessing(false);
         }
+    };
+    const handleProcessStartWithMode = async (diagramOnly: boolean) => {
+        await handleProcessStart(diagramOnly);
     };
 
     const openDiagramReview = () => {
@@ -1340,6 +1593,7 @@ export const useAiProcessing = ({
         diagramUrl?: string | null;
         year?: number | null;
         examSession?: number | null;
+        ingestionJobId?: number | null;
     }) => {
         return {
             subject: overrides?.subject ?? selectedSubject ?? question.subject,
@@ -1361,6 +1615,7 @@ export const useAiProcessing = ({
             text_file_url: question.textFileUrl ?? null,
             diagram_url: overrides?.diagramUrl ?? question.diagramUrl ?? null,
             diagram_info: question.diagram_info ?? null,
+            ingestion_job_id: overrides?.ingestionJobId ?? question.ingestionJobId ?? null,
             certification,
         };
     }, [certification, selectedSubject]);
@@ -1439,15 +1694,18 @@ export const useAiProcessing = ({
         const resolvedYear = resolveYearOrAlert();
         if (!resolvedYear) return;
         if (pendingSubjectPackage.questionDiagramMap.length > 0 && !isDiagramReviewComplete) {
-            setError('Supabase ?€?¥ì œì •ì „ ë„ë©´?¸ ì„¤ì •í•˜ê³  ?–?„ ì¸¡ê²€??ì£¼ì„¸??');
+            setError('Complete diagram review before saving to Supabase.');
             return;
         }
 
         setIsSavingSubject(true);
         setError(null);
+        setDiagramUpdateWarning(null);
+        setDiagramMatchPreview([]);
+        setDiagramMatchPreview([]);
         try {
             const { subjectName, questions, questionPageMap, questionDiagramMap, previewImages: previewMeta } = pendingSubjectPackage;
-            setStatusMessage(`${subjectName} - 저장 중...`);
+            setStatusMessage(`${subjectName} - Saving...`);
 
             // In a real refactor, we would extract image upload logic too. For brevity, assuming helpers work or placeholders.
             // Effectively we need to replicate the upload logic here.
@@ -1475,48 +1733,141 @@ export const useAiProcessing = ({
 
             const diagramUrlMap = new Map<number, string>();
             const metadataJobs: MetadataJob[] = [];
-            // Diagram upload logic would go here.
+            const diagramAssignmentMap = new Map(questionDiagramMap);
+            for (const [questionIndex, info] of diagramAssignmentMap.entries()) {
+                const base64 = pageBase64Map.get(info.pageIndex);
+                if (!base64) continue;
+                const cropped = await cropDiagram(base64, info.bounds);
+                const filename = generateUniqueFilename('jpg');
+                const url = await uploadDiagramImage(cropped, filename);
+                diagramUrlMap.set(questionIndex, url);
+            }
 
-            for (let i = 0; i < questions.length; i++) {
-                // const pageIdx ...
-                // const imageUrl ...
-                // const diagramUrl ...
-                const questionToSave = mapQuestionToInsertPayload(questions[i], {
-                    subject: selectedSubject || questions[i].subject,
-                    year: resolvedYear,
-                    examSession: typeof examSessionInput === 'number' ? examSessionInput : null,
-                    // imageUrl, diagramUrl
-                });
-                const { data: insertedRow, error: saveError } = await supabase
-                    .from('questions')
-                    .insert(questionToSave)
-                    .select('id')
-                    .single();
-                if (saveError) throw saveError;
-                if (insertedRow?.id) {
-                    const hasDiagram = Boolean(questionToSave.diagram_url || questions[i].needsManualDiagram);
-                    if (!hasDiagram) {
-                        metadataJobs.push({
-                            questionId: insertedRow.id,
-                            question: {
-                                ...questions[i],
-                                subject: questionToSave.subject ?? questions[i].subject,
-                                year: questionToSave.year ?? resolvedYear,
-                                questionText: questionToSave.question_text,
-                                options: questionToSave.options,
-                                answerIndex: questionToSave.answer_index,
-                                aiExplanation: questionToSave.ai_explanation ?? questions[i].aiExplanation ?? '',
-                                hint: questionToSave.hint ?? questions[i].hint ?? '',
-                                rationale: questionToSave.rationale ?? questions[i].rationale ?? '',
-                                topicCategory: questionToSave.topic_category ?? questions[i].topicCategory,
-                                topicKeywords: questionToSave.topic_keywords ?? questions[i].topicKeywords,
-                                difficultyLevel: normalizeDifficulty(questionToSave.difficulty_level ?? questions[i].difficultyLevel)
+            const existingQuestionsBySubject = new Map<string, Map<number, { id: number; diagramUrl: string | null }>>();
+            const targetExamSession = typeof examSessionInput === 'number' ? examSessionInput : null;
+
+            const loadExistingQuestions = async (subjectKey: string) => {
+                if (existingQuestionsBySubject.has(subjectKey)) {
+                    return existingQuestionsBySubject.get(subjectKey)!;
+                }
+                const subjectMap = new Map<number, { id: number; diagramUrl: string | null }>();
+                try {
+                    let existingQuery = supabase
+                        .from('questions')
+                        .select('id, question_text, diagram_url')
+                        .eq('subject', subjectKey)
+                        .eq('year', resolvedYear);
+                    existingQuery = targetExamSession === null
+                        ? existingQuery.is('exam_session', null)
+                        : existingQuery.eq('exam_session', targetExamSession);
+                    const { data: existingRows, error: existingError } = await existingQuery;
+                    if (existingError) {
+                        console.error('Failed to load existing questions for diagram match', existingError);
+                    } else {
+                        (existingRows || []).forEach((row: any) => {
+                            const questionNumber = extractLeadingQuestionNumber(row.question_text || '');
+                            if (questionNumber === null) return;
+                            const current = subjectMap.get(questionNumber);
+                            if (!current || (current.diagramUrl && !row.diagram_url)) {
+                                subjectMap.set(questionNumber, {
+                                    id: row.id,
+                                    diagramUrl: row.diagram_url ?? null
+                                });
                             }
                         });
                     }
+                } catch (loadError) {
+                    console.error('Failed to load existing questions for diagram match', loadError);
+                }
+                existingQuestionsBySubject.set(subjectKey, subjectMap);
+                return subjectMap;
+            };
+
+            const diagramUpdateMisses: string[] = [];
+            const missNoSubject: string[] = [];
+            const missNoNumber: string[] = [];
+            const missNotFound: string[] = [];
+            const matchPreview: Array<{
+                index: number;
+                questionNumber: number | null;
+                subject: string;
+                year: number | null;
+                examSession: number | null;
+                textPreview: string;
+                matchStatus: 'ready' | 'no-subject' | 'no-number' | 'not-found';
+            }> = [];
+
+            for (let i = 0; i < questions.length; i++) {
+                const questionNumber = extractLeadingQuestionNumber(questions[i].questionText || '');
+                const diagramUrl = diagramUrlMap.get(i) ?? questions[i].diagramUrl ?? null;
+                if (!diagramUrl) continue;
+                const subjectKey = resolveSubjectForQuestion(questions[i]);
+                if (!subjectKey) {
+                    const label = questionNumber !== null ? `#${questionNumber}` : `index ${i + 1}`;
+                    diagramUpdateMisses.push(label);
+                    missNoSubject.push(label);
+                    matchPreview.push({
+                        index: i + 1,
+                        questionNumber,
+                        subject: '',
+                        year: resolvedYear,
+                        examSession: targetExamSession,
+                        textPreview: (questions[i].questionText || '').slice(0, 80),
+                        matchStatus: 'no-subject'
+                    });
+                    continue;
+                }
+                if (questionNumber === null) {
+                    const label = `${subjectKey} index ${i + 1}`;
+                    diagramUpdateMisses.push(label);
+                    missNoNumber.push(label);
+                    matchPreview.push({
+                        index: i + 1,
+                        questionNumber,
+                        subject: subjectKey,
+                        year: resolvedYear,
+                        examSession: targetExamSession,
+                        textPreview: (questions[i].questionText || '').slice(0, 80),
+                        matchStatus: 'no-number'
+                    });
+                    continue;
+                }
+                const existingMap = await loadExistingQuestions(subjectKey);
+                const matched = existingMap.get(questionNumber);
+                if (matched) {
+                    if (diagramUrl !== matched.diagramUrl) {
+                        const { error: updateError } = await supabase
+                            .from('questions')
+                            .update({ diagram_url: diagramUrl })
+                            .eq('id', matched.id);
+                        if (updateError) throw updateError;
+                    }
+                    matchPreview.push({
+                        index: i + 1,
+                        questionNumber,
+                        subject: subjectKey,
+                        year: resolvedYear,
+                        examSession: targetExamSession,
+                        textPreview: (questions[i].questionText || '').slice(0, 80),
+                        matchStatus: 'ready'
+                    });
+                } else {
+                    const label = `${subjectKey} #${questionNumber}`;
+                    diagramUpdateMisses.push(label);
+                    missNotFound.push(label);
+                    matchPreview.push({
+                        index: i + 1,
+                        questionNumber,
+                        subject: subjectKey,
+                        year: resolvedYear,
+                        examSession: targetExamSession,
+                        textPreview: (questions[i].questionText || '').slice(0, 80),
+                        matchStatus: 'not-found'
+                    });
                 }
             }
 
+            setDiagramMatchPreview(matchPreview);
             setStatusMessage(`${subjectName} 저장 완료!`);
             setIsBatchConfirmed(true);
             setPendingSubjectPackage(null);
@@ -1527,6 +1878,20 @@ export const useAiProcessing = ({
             }
 
             enqueueMetadataJobs(metadataJobs);
+            if (diagramUpdateMisses.length > 0) {
+                const parts: string[] = [];
+                if (missNoSubject.length > 0) parts.push(`과목 추정 실패 ${missNoSubject.length}건`);
+                if (missNoNumber.length > 0) parts.push(`문항 번호 인식 실패 ${missNoNumber.length}건`);
+                if (missNotFound.length > 0) parts.push(`DB 매칭 실패 ${missNotFound.length}건`);
+                setDiagramUpdateWarning(`diagram_url 업데이트 매칭 실패: ${diagramUpdateMisses.length}건 (${parts.join(', ')})`);
+                console.warn('[DiagramMatch] Summary', {
+                    total: diagramUpdateMisses.length,
+                    missNoSubject,
+                    missNoNumber,
+                    missNotFound
+                });
+            }
+            setDiagramMatchPreview(matchPreview);
         } catch (error: any) {
             console.error(error);
             setError(`저장 실패: ${error.message}`);
@@ -1536,6 +1901,358 @@ export const useAiProcessing = ({
         }
     };
 
+    const resolveSubjectForQuestion = (question: QuestionModel): string => {
+        const questionNumber = extractLeadingQuestionNumber(question.questionText || '');
+        if (!selectedSubject && questionNumber !== null) {
+            const rangeMatch = subjectRanges.find(range => {
+                const start = Math.max(1, range.questionStart);
+                const end = Math.max(start, range.questionEnd);
+                return questionNumber >= start && questionNumber <= end;
+            });
+            if (rangeMatch?.name) return rangeMatch.name.trim();
+        }
+        const explicit = (question.subject || '').trim();
+        if (explicit) return explicit;
+        if (selectedSubject) return selectedSubject.trim();
+        return '';
+    };
+
+    const buildDiagramMatchPreview = useCallback(async (questions: QuestionModel[], resolvedYearValue: number | null) => {
+        if (!questions.length || resolvedYearValue === null) {
+            setDiagramMatchPreview([]);
+            return;
+        }
+        setDiagramUpdateWarning(null);
+        const targetExamSession = typeof examSessionInput === 'number' ? examSessionInput : null;
+        console.log('[DiagramMatchPreview] target exam session:', targetExamSession);
+        const existingQuestionsBySubject = new Map<string, Map<number, { id: number; diagramUrl: string | null }>>();
+
+        const loadExistingQuestions = async (subjectKey: string) => {
+            if (existingQuestionsBySubject.has(subjectKey)) {
+                return existingQuestionsBySubject.get(subjectKey)!;
+            }
+            const subjectMap = new Map<number, { id: number; diagramUrl: string | null }>();
+            let existingQuery = supabase
+                .from('questions')
+                .select('id, question_text, diagram_url')
+                .eq('subject', subjectKey)
+                .eq('year', resolvedYearValue);
+            existingQuery = targetExamSession === null
+                ? existingQuery.is('exam_session', null)
+                : existingQuery.eq('exam_session', targetExamSession);
+            const { data: existingRows, error: existingError } = await existingQuery;
+            if (existingError) {
+                console.error('Failed to load existing questions for diagram preview', existingError);
+            }
+            (existingRows || []).forEach((row: any) => {
+                const questionNumber = extractLeadingQuestionNumber(row.question_text || '');
+                if (questionNumber === null) return;
+                const current = subjectMap.get(questionNumber);
+                if (!current || (current.diagramUrl && !row.diagram_url)) {
+                    subjectMap.set(questionNumber, {
+                        id: row.id,
+                        diagramUrl: row.diagram_url ?? null
+                    });
+                }
+            });
+            existingQuestionsBySubject.set(subjectKey, subjectMap);
+            return subjectMap;
+        };
+
+        const previewRows: Array<{
+            index: number;
+            questionNumber: number | null;
+            subject: string;
+            year: number | null;
+            examSession: number | null;
+            textPreview: string;
+            matchStatus: 'ready' | 'no-subject' | 'no-number' | 'not-found';
+        }> = [];
+
+        for (let i = 0; i < questions.length; i++) {
+            const questionNumber = extractLeadingQuestionNumber(questions[i].questionText || '');
+            const subjectKey = resolveSubjectForQuestion(questions[i]);
+            if (!subjectKey) {
+                previewRows.push({
+                    index: i + 1,
+                    questionNumber,
+                    subject: '',
+                    year: resolvedYearValue,
+                    examSession: targetExamSession,
+                    textPreview: (questions[i].questionText || '').slice(0, 80),
+                    matchStatus: 'no-subject'
+                });
+                continue;
+            }
+            if (questionNumber === null) {
+                previewRows.push({
+                    index: i + 1,
+                    questionNumber,
+                    subject: subjectKey,
+                    year: resolvedYearValue,
+                    examSession: targetExamSession,
+                    textPreview: (questions[i].questionText || '').slice(0, 80),
+                    matchStatus: 'no-number'
+                });
+                continue;
+            }
+            const existingMap = await loadExistingQuestions(subjectKey);
+            const matched = existingMap.get(questionNumber);
+            previewRows.push({
+                index: i + 1,
+                questionNumber,
+                subject: subjectKey,
+                year: resolvedYearValue,
+                examSession: targetExamSession,
+                textPreview: (questions[i].questionText || '').slice(0, 80),
+                matchStatus: matched ? 'ready' : 'not-found'
+            });
+        }
+
+        setDiagramMatchPreview(previewRows);
+    }, [examSessionInput, resolveSubjectForQuestion, selectedSubject, subjectRanges]);
+
+    useEffect(() => {
+        if (!isDiagramOnlyMode || !pendingSubjectPackage || !isDiagramReviewComplete) return;
+        const resolvedYearValue = typeof yearInput === 'number' ? yearInput : null;
+        void buildDiagramMatchPreview(pendingSubjectPackage.questions, resolvedYearValue);
+    }, [buildDiagramMatchPreview, isDiagramOnlyMode, isDiagramReviewComplete, pendingSubjectPackage, yearInput]);
+
+    const handleSaveDiagramOnly = async () => {
+        if (isSavingSubject || !pendingSubjectPackage) return;
+        const resolvedYear = resolveYearOrAlert();
+        if (!resolvedYear) return;
+        if (pendingSubjectPackage.questionDiagramMap.length > 0 && !isDiagramReviewComplete) {
+            setError('Diagram review is required before saving.');
+            return;
+        }
+
+        setIsSavingSubject(true);
+        setError(null);
+        setDiagramUpdateWarning(null);
+        try {
+            const { subjectName, questions, questionDiagramMap, previewImages: previewMeta } = pendingSubjectPackage;
+            console.log('[DiagramSave] target exam session:', typeof examSessionInput === 'number' ? examSessionInput : null);
+            setStatusMessage(`${subjectName} - Saving diagram...`);
+
+            const pageBase64Map = new Map<number, string>();
+            for (const preview of previewMeta) {
+                let base64 = preview.dataUrl || '';
+                if (!base64 && preview.imageUrl) base64 = await fetchImageAsBase64(preview.imageUrl);
+                if (base64) pageBase64Map.set(preview.pageIndex, base64);
+            }
+
+            const diagramUrlMap = new Map<number, string>();
+            const diagramUploadStatus = new Map<number, { pageIndex: number; hasBase64: boolean; uploadedUrl: string | null }>();
+            const diagramAssignmentMap = new Map(questionDiagramMap);
+            for (const [questionIndex, info] of diagramAssignmentMap.entries()) {
+                const base64 = pageBase64Map.get(info.pageIndex);
+                if (!base64) {
+                    diagramUploadStatus.set(questionIndex, {
+                        pageIndex: info.pageIndex,
+                        hasBase64: false,
+                        uploadedUrl: null
+                    });
+                    continue;
+                }
+                const cropped = await cropDiagram(base64, info.bounds);
+                const filename = generateUniqueFilename('jpg');
+                const url = await uploadDiagramImage(cropped, filename);
+                diagramUrlMap.set(questionIndex, url);
+                diagramUploadStatus.set(questionIndex, {
+                    pageIndex: info.pageIndex,
+                    hasBase64: true,
+                    uploadedUrl: url
+                });
+            }
+
+            const existingQuestionsBySubject = new Map<string, Map<number, { id: number; diagramUrl: string | null }>>();
+            const targetExamSession = typeof examSessionInput === 'number' ? examSessionInput : null;
+
+            const loadExistingQuestions = async (subjectKey: string) => {
+                if (existingQuestionsBySubject.has(subjectKey)) {
+                    return existingQuestionsBySubject.get(subjectKey)!;
+                }
+                const subjectMap = new Map<number, { id: number; diagramUrl: string | null }>();
+                try {
+                    let existingQuery = supabase
+                        .from('questions')
+                        .select('id, question_text, diagram_url')
+                        .eq('subject', subjectKey)
+                        .eq('year', resolvedYear);
+                    existingQuery = targetExamSession === null
+                        ? existingQuery.is('exam_session', null)
+                        : existingQuery.eq('exam_session', targetExamSession);
+                    const { data: existingRows, error: existingError } = await existingQuery;
+                    if (existingError) {
+                        console.error('Failed to load existing questions for diagram match', existingError);
+                    } else {
+                        (existingRows || []).forEach((row: any) => {
+                            const questionNumber = extractLeadingQuestionNumber(row.question_text || '');
+                            if (questionNumber === null) return;
+                            const current = subjectMap.get(questionNumber);
+                            if (!current || (current.diagramUrl && !row.diagram_url)) {
+                                subjectMap.set(questionNumber, {
+                                    id: row.id,
+                                    diagramUrl: row.diagram_url ?? null
+                                });
+                            }
+                        });
+                    }
+                } catch (loadError) {
+                    console.error('Failed to load existing questions for diagram match', loadError);
+                }
+                existingQuestionsBySubject.set(subjectKey, subjectMap);
+                return subjectMap;
+            };
+
+            const diagramUpdateMisses: string[] = [];
+            const diagramUploadMisses: string[] = [];
+            const missNoDiagramAssignment: string[] = [];
+            const missNoBase64: string[] = [];
+            const missNoSubject: string[] = [];
+            const missNoNumber: string[] = [];
+            const missNotFound: string[] = [];
+            const matchPreview: Array<{
+                index: number;
+                questionNumber: number | null;
+                subject: string;
+                year: number | null;
+                examSession: number | null;
+                textPreview: string;
+                matchStatus: 'ready' | 'no-subject' | 'no-number' | 'not-found';
+            }> = [];
+
+            for (let i = 0; i < questions.length; i++) {
+                const questionNumber = extractLeadingQuestionNumber(questions[i].questionText || '');
+                const diagramUrl = diagramUrlMap.get(i) ?? questions[i].diagramUrl ?? null;
+                if (!diagramUrl) {
+                    const label = questionNumber !== null ? `#${questionNumber}` : `index ${i + 1}`;
+                    const uploadStatus = diagramUploadStatus.get(i);
+                    diagramUploadMisses.push(label);
+                    if (!uploadStatus) {
+                        missNoDiagramAssignment.push(label);
+                    } else if (!uploadStatus.hasBase64) {
+                        missNoBase64.push(label);
+                    }
+                    continue;
+                }
+                const subjectKey = resolveSubjectForQuestion(questions[i]);
+                if (!subjectKey) {
+                    const label = questionNumber !== null ? `#${questionNumber}` : `index ${i + 1}`;
+                    diagramUpdateMisses.push(label);
+                    missNoSubject.push(label);
+                    matchPreview.push({
+                        index: i + 1,
+                        questionNumber,
+                        subject: '',
+                        year: resolvedYear,
+                        examSession: targetExamSession,
+                        textPreview: (questions[i].questionText || '').slice(0, 80),
+                        matchStatus: 'no-subject'
+                    });
+                    continue;
+                }
+                if (questionNumber === null) {
+                    const label = `${subjectKey} index ${i + 1}`;
+                    diagramUpdateMisses.push(label);
+                    missNoNumber.push(label);
+                    matchPreview.push({
+                        index: i + 1,
+                        questionNumber,
+                        subject: subjectKey,
+                        year: resolvedYear,
+                        examSession: targetExamSession,
+                        textPreview: (questions[i].questionText || '').slice(0, 80),
+                        matchStatus: 'no-number'
+                    });
+                    continue;
+                }
+                const existingMap = await loadExistingQuestions(subjectKey);
+                const matched = existingMap.get(questionNumber);
+                if (matched) {
+                    if (diagramUrl !== matched.diagramUrl) {
+                        const { error: updateError } = await supabase
+                            .from('questions')
+                            .update({ diagram_url: diagramUrl })
+                            .eq('id', matched.id);
+                        if (updateError) throw updateError;
+                    }
+                    matchPreview.push({
+                        index: i + 1,
+                        questionNumber,
+                        subject: subjectKey,
+                        year: resolvedYear,
+                        examSession: targetExamSession,
+                        textPreview: (questions[i].questionText || '').slice(0, 80),
+                        matchStatus: 'ready'
+                    });
+                } else {
+                    const label = `${subjectKey} #${questionNumber}`;
+                    diagramUpdateMisses.push(label);
+                    missNotFound.push(label);
+                    matchPreview.push({
+                        index: i + 1,
+                        questionNumber,
+                        subject: subjectKey,
+                        year: resolvedYear,
+                        examSession: targetExamSession,
+                        textPreview: (questions[i].questionText || '').slice(0, 80),
+                        matchStatus: 'not-found'
+                    });
+                }
+            }
+
+            setDiagramMatchPreview(matchPreview);
+            setStatusMessage(`${subjectName} - 다이어그램 업데이트 완료`);
+            setIsBatchConfirmed(true);
+            setPendingSubjectPackage(null);
+            setIsDiagramReviewComplete(false);
+            setIsDiagramReviewOpen(false);
+            setIsDiagramOnlyMode(false);
+            if (diagramUpdateMisses.length > 0 || diagramUploadMisses.length > 0) {
+                const parts: string[] = [];
+                if (diagramUpdateMisses.length > 0) {
+                    const updateParts: string[] = [];
+                    if (missNoSubject.length > 0) updateParts.push(`subject match fail ${missNoSubject.length}`);
+                    if (missNoNumber.length > 0) updateParts.push(`question number missing ${missNoNumber.length}`);
+                    if (missNotFound.length > 0) updateParts.push(`DB match fail ${missNotFound.length}`);
+                    const updateSuffix = updateParts.length > 0 ? ` (${updateParts.join(', ')})` : '';
+                    parts.push(`diagram_url update match failed: ${diagramUpdateMisses.length}${updateSuffix}`);
+                }
+                if (diagramUploadMisses.length > 0) {
+                    const uploadParts: string[] = [];
+                    if (missNoDiagramAssignment.length > 0) uploadParts.push(`no diagram assignment ${missNoDiagramAssignment.length}`);
+                    if (missNoBase64.length > 0) uploadParts.push(`missing page image ${missNoBase64.length}`);
+                    const uploadSuffix = uploadParts.length > 0 ? ` (${uploadParts.join(', ')})` : '';
+                    const uploadList = diagramUploadMisses.length <= 10 ? ` [${diagramUploadMisses.join(', ')}]` : '';
+                    parts.push(`diagram upload skipped: ${diagramUploadMisses.length}${uploadSuffix}${uploadList}`);
+                }
+                setDiagramUpdateWarning(parts.join(' | '));
+            }
+        } catch (error: any) {
+            console.error(error);
+            setError(`다이어그램 업데이트 실패: ${error.message}`);
+            setIsBatchConfirmed(false);
+        } finally {
+            setIsSavingSubject(false);
+        }
+    };
+
+
+    useEffect(() => {
+        if (!pendingSubjectPackage || isSavingSubject) return;
+        if (isDiagramOnlyMode) return;
+        const subjectName = pendingSubjectPackage.subjectName;
+        if (autoSaveAttemptedRef.current.has(subjectName)) return;
+        if (pendingSubjectPackage.questionDiagramMap.length > 0 && !isDiagramReviewComplete) return;
+        const requiresManualDiagram = pendingSubjectPackage.questions.some(q => q.needsManualDiagram);
+        if (requiresManualDiagram) return;
+        if (typeof yearInput !== 'number' || yearError) return;
+
+        autoSaveAttemptedRef.current.add(subjectName);
+        void handleSaveCurrentSubject();
+    }, [pendingSubjectPackage, isSavingSubject, isDiagramReviewComplete, yearInput, yearError]);
 
     const handleLoadJson = (event: React.ChangeEvent<HTMLInputElement>) => {
         const file = event.target.files?.[0];
@@ -1576,13 +2293,16 @@ export const useAiProcessing = ({
         statusMessage,
         error,
         handleProcessStart,
+        handleProcessStartWithMode,
         handleSaveCurrentSubject,
+        handleSaveDiagramOnly,
 
         // Results
         extractedQuestions,
         updateExtractedQuestion,
         generatedVariants,
         previewImages,
+        isDiagramOnlyMode,
 
         // Subject Flow
         currentSubject,
@@ -1616,7 +2336,10 @@ export const useAiProcessing = ({
         autoDetectedYear,
         shouldShowYearError,
         yearError,
-        isYearTouched
+        isYearTouched,
+        lastVerificationSummary,
+        diagramUpdateWarning,
+        diagramMatchPreview
     };
 };
 

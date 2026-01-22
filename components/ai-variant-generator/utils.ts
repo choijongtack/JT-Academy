@@ -179,6 +179,126 @@ export const enforceSubjectQuestionQuota = (
     return result;
 };
 
+export type ProblemType = 'diagram' | 'table_graph' | 'calculation' | 'concept' | 'definition' | 'unknown';
+export type SolveRoute = 'diagram-llm' | 'text-llm' | 'code-verify';
+
+export interface ProblemClassification {
+    problemType: ProblemType;
+    solveRoute: SolveRoute;
+    requiredSignals: string[];
+}
+
+const DIAGRAM_KEYWORDS = [
+    '그림',
+    '회로',
+    '회로도',
+    '결선',
+    '배선',
+    '도면',
+    '도식'
+];
+
+const GRAPH_TABLE_KEYWORDS = [
+    '그래프',
+    '곡선',
+    '도표',
+    '표',
+    '좌표',
+    '축',
+    '눈금',
+    '스케일'
+];
+
+const DEFINITION_HINTS = [
+    '옳은 것은',
+    '옳지 않은 것은',
+    '틀린 것은',
+    '맞는 것은',
+    '가장 적절',
+    '정의',
+    '설명',
+    '의미'
+];
+
+const NUMERIC_UNIT_REGEX = /[0-9][0-9.,]*\s?(V|A|W|kW|kV|mA|mV|Ω|ohm|Hz|N|Pa|kPa|MPa|mm|cm|m|kg|g|s|ms|%|볼트|암페어|와트|옴|헤르츠)/i;
+
+const containsAny = (text: string, keywords: string[]) => {
+    return keywords.some(keyword => text.includes(keyword));
+};
+
+export const classifyProblem = (question: QuestionModel): ProblemClassification => {
+    const text = `${question.questionText || ''} ${Array.isArray(question.options) ? question.options.join(' ') : ''}`;
+    const requiredSignals: string[] = [];
+
+    const hasDiagramInfo = Boolean(question.diagram_info);
+    const hasAxesOrTable = Boolean(question.diagram_info?.axes || question.diagram_info?.table_entries?.length);
+    const hasDiagramKeyword = containsAny(text, DIAGRAM_KEYWORDS);
+    const hasGraphKeyword = containsAny(text, GRAPH_TABLE_KEYWORDS);
+
+    if (question.diagramBounds || hasDiagramInfo || hasDiagramKeyword) {
+        requiredSignals.push('diagram');
+    }
+
+    const hasNumeric = NUMERIC_UNIT_REGEX.test(text);
+    if (hasNumeric) {
+        requiredSignals.push('numeric');
+    }
+
+    if (hasAxesOrTable || hasGraphKeyword) {
+        return {
+            problemType: 'table_graph',
+            solveRoute: 'diagram-llm',
+            requiredSignals
+        };
+    }
+
+    if (question.diagramBounds || hasDiagramInfo || hasDiagramKeyword) {
+        return {
+            problemType: 'diagram',
+            solveRoute: 'diagram-llm',
+            requiredSignals
+        };
+    }
+
+    if (hasNumeric) {
+        return {
+            problemType: 'calculation',
+            solveRoute: 'code-verify',
+            requiredSignals
+        };
+    }
+
+    if (containsAny(text, DEFINITION_HINTS)) {
+        return {
+            problemType: 'definition',
+            solveRoute: 'text-llm',
+            requiredSignals
+        };
+    }
+
+    return {
+        problemType: 'concept',
+        solveRoute: 'text-llm',
+        requiredSignals
+    };
+};
+
+export const applyProblemClassification = (questions: QuestionModel[]): QuestionModel[] => {
+    return questions.map(question => {
+        const classification = classifyProblem(question);
+        const requiresDiagram = classification.problemType === 'diagram' || classification.problemType === 'table_graph';
+        const needsManualDiagram = Boolean(
+            question.needsManualDiagram ||
+            (requiresDiagram && !question.diagramBounds && !question.diagramUrl)
+        );
+        return {
+            ...question,
+            ...classification,
+            needsManualDiagram
+        };
+    });
+};
+
 
 export const extractLeadingQuestionNumber = (text: string): number | null => {
     const normalized = text.trim();

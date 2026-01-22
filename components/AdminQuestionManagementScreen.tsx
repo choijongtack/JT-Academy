@@ -3,6 +3,7 @@ import { QuestionModel, AuthSession } from '../types';
 import { quizApi } from '../services/quizApi';
 import { parseAnswerSheetFromImage, generateExplanationForAnswer } from '../services/geminiService';
 import { supabase } from '../services/supabaseClient';
+import { fetchIngestionJobById } from '../services/ingestionService';
 import FormattedText from './FormattedText';
 import { isAdmin } from '../services/authService';
 import { CERTIFICATIONS, CERTIFICATION_SUBJECTS, SUBJECT_TOPICS } from '../constants';
@@ -114,6 +115,7 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
     const [subjectsByCertification, setSubjectsByCertification] = useState<Record<string, string[]>>({});
     const [yearsByCertification, setYearsByCertification] = useState<Record<string, number[]>>({});
     const [sessionsByCertification, setSessionsByCertification] = useState<Record<string, number[]>>({});
+    const [sessionsByCertificationYear, setSessionsByCertificationYear] = useState<Record<string, number[]>>({});
     const [yearsByCertificationSubject, setYearsByCertificationSubject] = useState<Record<string, number[]>>({});
     const [topicsByCertificationSubject, setTopicsByCertificationSubject] = useState<Record<string, string[]>>({});
     const [loading, setLoading] = useState(true);
@@ -153,6 +155,7 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
     const [isSolvingMismatches, setIsSolvingMismatches] = useState(false);
     const [isConfirmingUpdates, setIsConfirmingUpdates] = useState(false);
     const [showUpdatePreview, setShowUpdatePreview] = useState(false);
+    const ingestionCacheRef = React.useRef<Map<number, any>>(new Map());
 
     // Check admin permission
     useEffect(() => {
@@ -209,6 +212,7 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
         const subjectsByCert = new Map<string, Set<string>>();
         const yearsByCert = new Map<string, Set<number>>();
         const sessionsByCert = new Map<string, Set<number>>();
+        const sessionsByCertYear = new Map<string, Set<number>>();
         const yearsByCertSubject = new Map<string, Set<number>>();
         const topicsByCertSubject = new Map<string, Set<string>>();
         let offset = 0;
@@ -263,6 +267,15 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
                             sessionsByCert.set(certificationValue, new Set());
                         }
                         sessionsByCert.get(certificationValue)!.add(row.exam_session);
+
+                        // Track sessions by certification + year
+                        if (row.year) {
+                            const key = `${certificationValue}::${row.year}`;
+                            if (!sessionsByCertYear.has(key)) {
+                                sessionsByCertYear.set(key, new Set());
+                            }
+                            sessionsByCertYear.get(key)!.add(row.exam_session);
+                        }
                     }
                     if (subjectValue && row.year) {
                         const key = `${certificationValue}::${subjectValue}`;
@@ -317,6 +330,12 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
         });
         setSessionsByCertification(sessionsByCertRecord);
 
+        const sessionsByCertYearRecord: Record<string, number[]> = {};
+        sessionsByCertYear.forEach((sessionSet, key) => {
+            sessionsByCertYearRecord[key] = Array.from(sessionSet).sort((a, b) => a - b);
+        });
+        setSessionsByCertificationYear(sessionsByCertYearRecord);
+
         const yearsByCertSubjectRecord: Record<string, number[]> = {};
         yearsByCertSubject.forEach((yearSet, key) => {
             yearsByCertSubjectRecord[key] = Array.from(yearSet).sort((a, b) => b - a);
@@ -349,6 +368,38 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
         if (!match) return null;
         const parsed = parseInt(match[1], 10);
         return Number.isNaN(parsed) ? null : parsed;
+    };
+
+    const resolveIngestionContext = async (question: ManagedQuestion) => {
+        const jobId = question.ingestionJobId;
+        if (!jobId) return null;
+        try {
+            const cached = ingestionCacheRef.current.get(jobId);
+            const jobData = cached || await fetchIngestionJobById(jobId);
+            if (!cached) {
+                ingestionCacheRef.current.set(jobId, jobData);
+            }
+            const questionNumber = extractQuestionNumber(question.questionText || '');
+            if (!questionNumber || !jobData?.structure_analysis) {
+                return null;
+            }
+            const match = jobData.structure_analysis.find((entry: any) => entry.questionNumber === questionNumber);
+            if (!match) return null;
+            return {
+                structureAnalysis: {
+                    question_text_raw: question.questionText || '',
+                    has_diagram: Boolean(question.diagramUrl),
+                    diagram_type: match.diagramType || 'UNKNOWN',
+                    diagram_elements: [],
+                    unknowns: Array.isArray(match.unknowns) ? match.unknowns : [],
+                    given_values: Array.isArray(match.givenValues) ? match.givenValues : []
+                },
+                diagramInfo: question.diagram_info ?? null
+            };
+        } catch (error) {
+            console.error('Failed to resolve ingestion context', error);
+            return null;
+        }
     };
 
     const fetchImageAsDataUrl = async (url: string): Promise<string> => {
@@ -465,12 +516,13 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
         for (const mismatch of answerMismatches) {
             const { question } = mismatch;
             try {
+                const ingestionContext = await resolveIngestionContext(question);
                 let solved;
                 if (question.diagramUrl) {
                     const dataUrl = await fetchImageAsDataUrl(question.diagramUrl);
-                    solved = await generateExplanationForAnswer(question, mismatch.expectedIndex, dataUrl);
+                    solved = await generateExplanationForAnswer(question, mismatch.expectedIndex, dataUrl, ingestionContext ?? undefined);
                 } else {
-                    solved = await generateExplanationForAnswer(question, mismatch.expectedIndex);
+                    solved = await generateExplanationForAnswer(question, mismatch.expectedIndex, undefined, ingestionContext ?? undefined);
                 }
                 updates.push({
                     questionId: mismatch.questionId,
@@ -547,11 +599,18 @@ const AdminQuestionManagementScreen: React.FC<AdminQuestionManagementScreenProps
     }, [availableYears, filterCertification, filterSubject, yearsByCertification, yearsByCertificationSubject]);
 
     const availableSessionsForFilter = useMemo(() => {
+        // Most specific: certification + year
+        if (filterCertification && filterYear) {
+            const key = `${filterCertification}::${filterYear}`;
+            return sessionsByCertificationYear[key] || [];
+        }
+        // Fallback: certification only
         if (filterCertification) {
             return sessionsByCertification[filterCertification] || [];
         }
+        // Global fallback
         return availableExamSessions;
-    }, [availableExamSessions, filterCertification, sessionsByCertification]);
+    }, [availableExamSessions, filterCertification, filterYear, sessionsByCertification, sessionsByCertificationYear]);
 
     const availableTopics = useMemo(() => {
         if (!filterSubject) return [];

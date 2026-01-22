@@ -186,7 +186,8 @@ export const quizApi = {
         diagramUrl: item.diagram_url,
         certification: item.certification,
         needsManualDiagram: item.needs_manual_diagram,
-        diagram_info: item.diagram_info
+        diagram_info: item.diagram_info,
+        ingestionJobId: item.ingestion_job_id
       })),
       count: count ?? 0
     };
@@ -257,7 +258,8 @@ export const quizApi = {
       diagramUrl: item.diagram_url,
       certification: item.certification,
       needsManualDiagram: item.needs_manual_diagram,
-      diagram_info: item.diagram_info
+      diagram_info: item.diagram_info,
+      ingestionJobId: item.ingestion_job_id
     }));
   },
 
@@ -468,7 +470,8 @@ export const quizApi = {
       diagramUrl: data.diagram_url,
       certification: data.certification,
       needsManualDiagram: data.needs_manual_diagram,
-      diagram_info: data.diagram_info
+      diagram_info: data.diagram_info,
+      ingestionJobId: data.ingestion_job_id
     };
   },
 
@@ -592,7 +595,8 @@ export const quizApi = {
       diagramUrl: item.diagram_url,
       certification: item.certification,
       needsManualDiagram: item.needs_manual_diagram,
-      diagram_info: item.diagram_info
+      diagram_info: item.diagram_info,
+      ingestionJobId: item.ingestion_job_id
     }));
   },
 
@@ -712,7 +716,8 @@ export const quizApi = {
         diagram_url: question.diagramUrl || null,
         certification: question.certification || '전기기사',
         needs_manual_diagram: question.needsManualDiagram || false,
-        diagram_info: question.diagram_info || null
+        diagram_info: question.diagram_info || null,
+        ingestion_job_id: question.ingestionJobId ?? null
       })
       .select()
       .single();
@@ -744,7 +749,8 @@ export const quizApi = {
       diagramUrl: data.diagram_url,
       certification: data.certification,
       needsManualDiagram: data.needs_manual_diagram,
-      diagram_info: data.diagram_info
+      diagram_info: data.diagram_info,
+      ingestionJobId: data.ingestion_job_id
     };
   },
 
